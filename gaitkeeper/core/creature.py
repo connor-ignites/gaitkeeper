@@ -16,7 +16,7 @@ from . import adapt_math as am
 from . import body_rules as br
 from . import legs as L
 from . import reactions as R
-from .rig import body_axes, clip_range, rest_space, set_action
+from .rig import body_axes, clip_label, clip_range, metres_world, rest_space, set_action
 
 SKIP = (
     "tail",
@@ -98,7 +98,7 @@ def feet_tracks(
     """Per hind foot (left, right): its height and how far ahead of the pelvis it is, frame by frame."""
     set_action(arm, act)
     fwd = body_axes(arm, leg_roles(arm, legs, pelvis))[0]
-    mw = arm.matrix_world
+    mw = metres_world(arm, pelvis)
     tracks: dict[str, list[list[float]]] = {s: [[], []] for s in "lr"}
     first, last = clip_range(act)
     for f in range(first, last + 1):
@@ -142,15 +142,16 @@ def measure_clip(
     pelvis: str,
     hopper: bool,
     rest_width: dict[str, float],
+    scene: bpy.types.Scene,
     strike: bool = False,
     enemy: bool = False,
 ) -> tuple[dict, list[str]]:
-    """strike: treat the clip as a strike with the legs even if its name doesn't say so. enemy: the
-    clip is an enemy's (its strike must give the player time to react); its name can say so too."""
-    from .rig import clip_label, set_action
+    """Play the clip on `scene` and judge it; positions are read in metres (metres_world). strike: treat the
+    clip as a strike with the legs even if its name doesn't say so. enemy: the clip is an enemy's (its strike
+    must give the player time to react); its name can say so too."""
 
     set_action(arm, act)
-    mw = arm.matrix_world
+    mw = metres_world(arm, pelvis)
     a, b = round(act.frame_range[0]), round(act.frame_range[1])
     per_leg: dict[str, list] = {k: [] for k in legs}
     pel = []
@@ -160,7 +161,7 @@ def measure_clip(
     ez: dict[str, list] = {e: [] for e in ends}
     head_z = []
     for f in range(a, b + 1):
-        bpy.context.scene.frame_set(f)
+        scene.frame_set(f)
         for k, names in legs.items():
             per_leg[k].append([tuple(mw @ arm.pose.bones[n].head) for n in names])  # joints only, no tails
         p = mw @ arm.pose.bones[pelvis].head
@@ -171,7 +172,7 @@ def measure_clip(
             ez[e].append(w.z)
         if head:
             head_z.append((mw @ arm.pose.bones[head].head).z)
-    fps = bpy.context.scene.render.fps / bpy.context.scene.render.fps_base
+    fps = scene.render.fps / scene.render.fps_base
     cyclic = loops(act.name)
     m = L.measure(per_leg, pel, fps, cyclic, rest_width)
     v = L.verdicts(m, act.name, hopper)
@@ -189,11 +190,11 @@ def measure_clip(
         v = v + R.block_verdicts([q[2] for q in pel[:k]], {"head": head_z[:k]}, fps)
     name = clip_label(arm, act.name)  # an export's "Scene" says nothing: the file's name can say "Bite"
     if strike or any(w in name.lower() for w in LEG_STRIKE):
-        sm, sv = measure_strike(arm, act, legs, per_leg, fps, hopper, enemy or R.is_enemy(name))
+        sm, sv = measure_strike(arm, act, legs, per_leg, fps, hopper, scene, enemy or R.is_enemy(name))
         m["strike"] = sm
         v = v + sv
     elif R.is_upper_strike(name):
-        um, uv = measure_upper_strike(arm, act, legs, pelvis, fps, enemy or R.is_enemy(name))
+        um, uv = measure_upper_strike(arm, act, legs, pelvis, fps, scene, enemy or R.is_enemy(name))
         if um:
             m["upper_strike"] = um
         v = v + uv
@@ -251,18 +252,18 @@ def measure_upper_strike(
     legs: dict[str, list[str]],
     pelvis: str,
     fps: float,
+    scene: bpy.types.Scene,
     enemy: bool = False,
 ) -> tuple[dict, list[str]]:
     """A strike with the arms, claws or jaws (0.8). The striking point is the one moving fastest against
     the hips, so a lunge or a charge across the ground isn't mistaken for a punch; it is then judged where
-    the player sees it, in the world."""
-    from .rig import set_action
+    the player sees it, in the world (in metres)."""
 
     parts = find_upper(arm, legs)
     if not parts:
         return {}, []
     set_action(arm, act)
-    mw = arm.matrix_world
+    mw = metres_world(arm, pelvis)
     pb = arm.pose.bones
     a, b = round(act.frame_range[0]), round(act.frame_range[1])
     head = parts.get("head", [None])[-1]
@@ -276,7 +277,7 @@ def measure_upper_strike(
     joints: dict[str, list] = {k: [] for k in parts}
     pel, gape = [], []
     for f in range(a, b + 1):
-        bpy.context.scene.frame_set(f)
+        scene.frame_set(f)
         pel.append(tuple(mw @ pb[pelvis].head))
         for k, chain in parts.items():
             pts = [tuple(mw @ pb[n].head) for n in chain]
@@ -384,11 +385,11 @@ def measure_strike(
     per_leg: dict[str, list],
     fps: float,
     hopper: bool,
+    scene: bpy.types.Scene,
     enemy: bool = False,
 ) -> tuple[dict, list[str]]:
     """A creature's strike with a leg: the fastest leg end. Dead stop and stutter, corners in its path
     and, for a hopper's kick (the kangaroo footage), the foot's angle and toe curl at the hit."""
-    from .rig import set_action
 
     best, best_key = {}, ""
     for k, joints in per_leg.items():
@@ -429,7 +430,7 @@ def measure_strike(
         a = round(act.frame_range[0])
         dirs = []
         for f in range(a, a + len(end)):
-            bpy.context.scene.frame_set(f)
+            scene.frame_set(f)
             dirs.append(leg_dirs(arm, names))
         ankle, curl = R.foot_angles(
             [d[0] for d in dirs], [d[1] for d in dirs], [d[2] for d in dirs], leg_dirs(arm, names, posed=False)

@@ -21,6 +21,7 @@ def two_bone_ik(
     foot: bpy.types.PoseBone,
     target: Vector,
     foot_rot: Matrix,
+    view_layer: bpy.types.ViewLayer,
 ) -> None:
     """Analytic IK in armature space: knee stays in its current bending plane, foot ends at
     `target` with the rotation it had before the edit."""
@@ -40,15 +41,15 @@ def two_bone_ik(
     knee = H + dirn * (l1 * math.cos(a)) + pole * (l1 * math.sin(a))
     r1 = (K - H).rotation_difference(knee - H).to_matrix().to_4x4()
     thigh.matrix = Matrix.Translation(H) @ r1 @ Matrix.Translation(-H) @ thigh.matrix
-    bpy.context.view_layer.update()
+    view_layer.update()
     K2, A2 = calf.head.copy(), foot.head.copy()
     r2 = (A2 - K2).rotation_difference(target - K2).to_matrix().to_4x4()
     calf.matrix = Matrix.Translation(K2) @ r2 @ Matrix.Translation(-K2) @ calf.matrix
-    bpy.context.view_layer.update()
+    view_layer.update()
     m = foot_rot.copy()
     m.translation = foot.head
     foot.matrix = m
-    bpy.context.view_layer.update()
+    view_layer.update()
 
 
 def foot_targets(
@@ -60,6 +61,7 @@ def foot_targets(
     floor: dict[str, float],
     roles: dict[str, str],
     orig_z: dict[str, list[float]],
+    scene: bpy.types.Scene,
     max_nudge: float | None = None,
 ) -> dict[str, list[Vector]]:
     """Where each ankle should be on each frame: planted feet are locked (moving only at the clip's
@@ -68,13 +70,12 @@ def foot_targets(
     worked out on the ball of the foot, the part on the ground (as the checks measure it): when the
     heel lifts the ankle slows while the ball keeps its path, so locking the ankle would push the ball
     off. The ankle then moves by the same correction."""
-    scn = bpy.context.scene
     cur: dict[str, list[Vector]] = {foot.name: [] for _, _, foot in legs}
     ball: dict[str, list[float]] = {foot.name: [] for _, _, foot in legs}
     ballp: dict[str, list[Vector]] = {foot.name: [] for _, _, foot in legs}
     toe_of = {roles.get("foot_l"): roles.get("toe_l"), roles.get("foot_r"): roles.get("toe_r")}
     for f in range(n):
-        scn.frame_set(f)
+        scene.frame_set(f)
         for _, _, foot in legs:
             cur[foot.name].append(foot.head.copy())
             tb = toe_of.get(foot.name)
@@ -157,7 +158,14 @@ def foot_targets(
     return out
 
 
-def root_motion_pass(arm: bpy.types.Object, roles: dict[str, str], n: int, mode: str) -> str:
+def root_motion_pass(
+    arm: bpy.types.Object,
+    roles: dict[str, str],
+    n: int,
+    mode: str,
+    scene: bpy.types.Scene,
+    view_layer: bpy.types.ViewLayer,
+) -> str:
     """mode "extract": the body's steady travel moves onto the root bone (sway stays on the hips).
     mode "in_place": the steady travel is removed, so the clip walks on the spot.
     Returns a plain-English note."""
@@ -168,24 +176,23 @@ def root_motion_pass(arm: bpy.types.Object, roles: dict[str, str], n: int, mode:
     while root.parent is not None:
         root = root.parent
     flat = Vector((1, 1, 0))
-    scn = bpy.context.scene
-    scn.frame_set(0)
+    scene.frame_set(0)
     h0, r0 = hips.head.copy(), root.head.copy()
-    scn.frame_set(n - 1)
+    scene.frame_set(n - 1)
     total = (hips.head - h0) * flat  # how far the body travels
     on_root = (root.head - r0) * flat  # how much of that the root already carries
     own = total - on_root  # travel stored on the hips
     for f in range(n):
-        scn.frame_set(f)
+        scene.frame_set(f)
         u = f / max(1, n - 1)
         root_now = (root.head - r0) * flat
         want_root = total * u if mode == "extract" else Vector((0, 0, 0))
         root.matrix = Matrix.Translation(want_root - root_now) @ root.matrix
-        bpy.context.view_layer.update()
+        view_layer.update()
         # the hips lose their own steady travel; in "in_place" they also lose what the root carried
         # (moving the root already took that away), so only `own` is removed in both modes
         hips.matrix = Matrix.Translation(-own * u) @ hips.matrix
-        bpy.context.view_layer.update()
+        view_layer.update()
         for pb in (root, hips):
             pb.keyframe_insert("location", frame=f, group=pb.name)
             key_rotation(pb, f)
@@ -193,11 +200,12 @@ def root_motion_pass(arm: bpy.types.Object, roles: dict[str, str], n: int, mode:
     return f"root motion: {total.length:.2f} m of travel {word}"
 
 
-def smooth_pops(arm: bpy.types.Object, pops: dict[str, list[int]], n: int, start: int = 0) -> int:
+def smooth_pops(
+    arm: bpy.types.Object, pops: dict[str, list[int]], n: int, scene: bpy.types.Scene, start: int = 0
+) -> int:
     """Spread each one-frame snap over its neighbours: the poses either side of the jump are
     re-keyed halfway between their own neighbours. `pops` holds sample indices; sample j is frame
     start + j. Returns how many keys were changed."""
-    scn = bpy.context.scene
     changed = 0
     for name, frames in pops.items():
         pb = arm.pose.bones.get(name)
@@ -205,13 +213,13 @@ def smooth_pops(arm: bpy.types.Object, pops: dict[str, list[int]], n: int, start
             continue
         rots = []
         for j in range(n):
-            scn.frame_set(start + j)
+            scene.frame_set(start + j)
             rots.append(tuple(pb.matrix_basis.to_quaternion()))
         for i in frames:
             for j in (i, i + 1):
                 if 0 < j < n - 1:
                     rots[j] = mm.q_slerp(rots[j - 1], rots[j + 1], 0.5)
-                    scn.frame_set(start + j)
+                    scene.frame_set(start + j)
                     set_rotation(pb, rots[j])
                     key_rotation(pb, start + j)
                     changed += 1

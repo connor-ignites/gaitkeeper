@@ -82,12 +82,14 @@ class GAITKEEPER_OT_adapt_clear(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def adapt_current(arm: bpy.types.Object, scene: bpy.types.Scene) -> tuple[bpy.types.Action, dict]:
+def adapt_current(
+    arm: bpy.types.Object, scene: bpy.types.Scene, view_layer: bpy.types.ViewLayer
+) -> tuple[bpy.types.Action, dict]:
     """Run Pose Adapt on the current clip; animals are judged by the animal checks."""
     settings = scene.gaitkeeper
     act = arm.animation_data.action
     edited = adapt.capture_pose(arm)
-    animal = runner.animal_rig(arm, settings)
+    animal = runner.animal_rig(arm, scene, view_layer)
     judge, cyclic, roles = None, None, rig.role_map(arm)
     if animal is not None:
         roles = creature.leg_roles(arm, animal.legs, animal.pelvis)
@@ -95,7 +97,14 @@ def adapt_current(arm: bpy.types.Object, scene: bpy.types.Scene) -> tuple[bpy.ty
 
         def judge(a: bpy.types.Action) -> list[str]:
             return creature.measure_clip(
-                arm, a, animal.legs, animal.pelvis, animal.hopper, animal.rest_widths, settings.every_clip_strikes
+                arm,
+                a,
+                animal.legs,
+                animal.pelvis,
+                animal.hopper,
+                animal.rest_widths,
+                scene,
+                settings.every_clip_strikes,
             )[1]
 
     return adapt.adapt_clip(
@@ -105,6 +114,8 @@ def adapt_current(arm: bpy.types.Object, scene: bpy.types.Scene) -> tuple[bpy.ty
         runner.scene_fps(scene),
         scene.frame_current,
         edited,
+        scene,
+        view_layer,
         settings.adapt_mode.lower(),
         settings.adapt_fade,
         settings.adapt_mirror,
@@ -131,7 +142,7 @@ the original clip is not changed"""
         arm, scene = context.object, context.scene
         act, frame = arm.animation_data.action, scene.frame_current
         try:
-            new, rep = adapt_current(arm, scene)
+            new, rep = adapt_current(arm, scene, context.view_layer)
         except Exception as e:  # reported in the UI; the traceback goes to the system console
             traceback.print_exc()
             rig.set_action(arm, act)

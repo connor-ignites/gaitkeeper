@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import traceback
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import bpy
 from bpy.props import StringProperty
@@ -17,6 +19,28 @@ from .core.report import panel_summary, report_text, status
 def armature_with_clip(context: bpy.types.Context) -> bool:
     ob = context.object
     return ob is not None and ob.type == "ARMATURE" and ob.animation_data is not None and ob.animation_data.action
+
+
+@contextmanager
+def shown_progress(context: bpy.types.Context, doing: str) -> Iterator[runner.Progress | None]:
+    """A progress callback for the runner that moves the progress cursor and names the clip in the status
+    bar, both cleared when the block ends. None without a window (Blender run in the background, or no window in
+    the context), so nothing is shown."""
+    if bpy.app.background or context.window is None:
+        yield None
+        return
+    wm, workspace = context.window_manager, context.workspace
+
+    def show(done: int, total: int, clip: str) -> None:
+        wm.progress_update(done / max(1, total))
+        workspace.status_text_set(f"GaitKeeper: {doing} {clip} ({done + 1} of {total})")
+
+    wm.progress_begin(0.0, 1.0)
+    try:
+        yield show
+    finally:
+        wm.progress_end()
+        workspace.status_text_set(None)
 
 
 class GAITKEEPER_OT_check(bpy.types.Operator):
@@ -33,7 +57,8 @@ class GAITKEEPER_OT_check(bpy.types.Operator):
     def execute(self, context: bpy.types.Context) -> set[str]:
         settings = context.scene.gaitkeeper
         try:
-            result = runner.run_check(context.object, settings)
+            with shown_progress(context, "checking") as progress:
+                result = runner.run_check(context.object, context.scene, context.view_layer, progress)
         except Exception as e:  # reported in the UI; the traceback goes to the system console
             traceback.print_exc()
             self.report({"ERROR"}, f"GaitKeeper couldn't check this rig: {type(e).__name__}: {e}")
@@ -63,7 +88,8 @@ the original is not changed"""
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         try:
-            new, rep = runner.fix_current_clip(context.object, context.scene.gaitkeeper)
+            with shown_progress(context, "fixing") as progress:
+                new, rep = runner.fix_current_clip(context.object, context.scene, context.view_layer, progress)
         except Exception as e:  # reported in the UI; the traceback goes to the system console
             traceback.print_exc()
             self.report({"ERROR"}, f"GaitKeeper couldn't fix this clip: {type(e).__name__}: {e}")

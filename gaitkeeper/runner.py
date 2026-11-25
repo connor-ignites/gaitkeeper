@@ -5,7 +5,7 @@ and leaves the scene as it found it."""
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import NamedTuple
 
@@ -29,6 +29,8 @@ NOTHING_TO_MEND = "nothing to mend: this clip has no keys on this rig's bones"
 BONES_NOT_FOUND = (
     "REFUSED some of this rig's bones weren't found, so a fix could move the wrong ones. Press Check to see which."
 )
+
+Progress = Callable[[int, int, str], None]  # (clips done, clips in all, the clip starting now)
 
 
 class AnimalRig(NamedTuple):
@@ -73,8 +75,18 @@ def _set_transform(item: bpy.types.Object | bpy.types.PoseBone, values: tuple) -
         setattr(item, name, value)
 
 
+def reported(actions: list[bpy.types.Action], progress: Progress | None) -> Iterator[bpy.types.Action]:
+    """The clips one by one, telling `progress` (done, total, clip name) as each one starts."""
+    for done, act in enumerate(actions):
+        if progress is not None:
+            progress(done, len(actions), act.name)
+        yield act
+
+
 @contextmanager
-def kept_transforms(scene: bpy.types.Scene, skip: bpy.types.Object | None = None) -> Iterator[None]:
+def kept_transforms(
+    scene: bpy.types.Scene, view_layer: bpy.types.ViewLayer, skip: bpy.types.Object | None = None
+) -> Iterator[None]:
     """Put every object's and pose bone's transform back, keyed or not. Playing clips frame by frame
     re-evaluates animation, which would otherwise throw away a pose the user set but hasn't keyed."""
     saved = []
@@ -87,10 +99,10 @@ def kept_transforms(scene: bpy.types.Scene, skip: bpy.types.Object | None = None
     try:
         yield
     finally:
-        bpy.context.view_layer.update()  # let the restored clip evaluate first, so it can't overwrite the pose
+        view_layer.update()  # let the restored clip evaluate first, so it can't overwrite the pose
         for item, values in saved:
             _set_transform(item, values)
-        bpy.context.view_layer.update()
+        view_layer.update()
 
 
 @contextmanager
@@ -110,9 +122,12 @@ def kept_action(arm: bpy.types.Object) -> Iterator[None]:
                 ad.action_slot = slot
 
 
-def body_kind(arm: bpy.types.Object, legs: dict, settings) -> tuple[bool, bool]:
+def body_kind(
+    arm: bpy.types.Object, legs: dict, scene: bpy.types.Scene, view_layer: bpy.types.ViewLayer
+) -> tuple[bool, bool]:
     """(animal, hopper). Auto: four legs, or two legs and a tail, is an animal. Two legs and a tail hop unless
     the stepping clips show the feet taking turns (an emu walks; a kangaroo hops)."""
+    settings = scene.gaitkeeper
     tail = any(TAIL.search(b.name.lower()) for b in arm.data.bones)
     fore = any(k.startswith("fore") for k in legs)
     animal, hopper = fore or tail, tail and not fore and len(legs) == 2
@@ -121,15 +136,16 @@ def body_kind(arm: bpy.types.Object, legs: dict, settings) -> tuple[bool, bool]:
     if settings.hopper != "AUTO":
         hopper = settings.hopper == "YES"
     elif hopper:
-        hopper = hops_by_motion(arm, legs) is not False
+        hopper = hops_by_motion(arm, legs, scene, view_layer) is not False
     return animal, hopper
 
 
-def hops_by_motion(arm: bpy.types.Object, legs: dict) -> bool | None:
+def hops_by_motion(
+    arm: bpy.types.Object, legs: dict, scene: bpy.types.Scene, view_layer: bpy.types.ViewLayer
+) -> bool | None:
     """Whether a two-legged animal's stepping clips move its feet together (None: no clip tells).
     Plays the clips, then puts the scene back as it was."""
-    scene = bpy.context.scene
-    with kept_transforms(scene), kept_frame(scene), kept_action(arm):
+    with kept_transforms(scene, view_layer), kept_frame(scene), kept_action(arm):
         return creature.hops(arm, clips_to_check(arm, False), legs, pelvis_bone(arm, legs), scene)
 
 
@@ -142,10 +158,10 @@ def pelvis_bone(arm: bpy.types.Object, legs: dict) -> str:
     return top.parent.name if top.parent else top.name
 
 
-def animal_rig(arm: bpy.types.Object, settings) -> AnimalRig | None:
-    """The animal setup when the settings make this rig an animal with legs, else None."""
+def animal_rig(arm: bpy.types.Object, scene: bpy.types.Scene, view_layer: bpy.types.ViewLayer) -> AnimalRig | None:
+    """The animal setup when the scene's settings make this rig an animal with legs, else None."""
     legs = creature.find_legs(arm)
-    animal, hopper = body_kind(arm, legs, settings)
+    animal, hopper = body_kind(arm, legs, scene, view_layer)
     if not animal or not legs:
         return None
     return AnimalRig(legs, pelvis_bone(arm, legs), hopper, creature.rest_width(arm, legs))
@@ -171,26 +187,38 @@ def judged_label(arm: bpy.types.Object, act: bpy.types.Action, enemy: bool) -> s
     return rig.clip_label(arm, act.name) + (" (enemy)" if enemy else "")
 
 
-def check_person(arm: bpy.types.Object, actions: list, enemy: bool) -> tuple[list[str], dict[str, list[str]]]:
+def check_person(
+    arm: bpy.types.Object,
+    actions: list,
+    enemy: bool,
+    scene: bpy.types.Scene,
+    view_layer: bpy.types.ViewLayer,
+    progress: Progress | None = None,
+) -> tuple[list[str], dict[str, list[str]]]:
     """Skeleton, skin and per-clip lines for a two-legged, two-armed rig."""
     roles = rig.role_map(arm)
-    fps = scene_fps(bpy.context.scene)
+    fps = scene_fps(scene)
     saved_file = bpy.data.filepath.lower().endswith(".blend")
     report = checks.rig_report(arm, roles)
     rig_lines = checks.rig_verdicts(report, None)
-    rig_lines += skin.skin_verdicts(skin.skin_report(arm, roles), saved_file)
+    rig_lines += skin.skin_verdicts(skin.skin_report(arm, roles, view_layer), saved_file)
     # a clip on a rig whose bones weren't all found can't honestly PASS
     partly = [NOT_FULLY_CHECKED] if report["missing"] else []
     clips = {}
-    for act in actions:
+    for act in reported(actions, progress):
         label = judged_label(arm, act, enemy)
-        measured = checks.measure(rig.sample(arm, act, roles), fps, "loop" in act.name.lower(), arm, label)
+        measured = checks.measure(rig.sample(arm, act, roles, scene), fps, "loop" in act.name.lower(), arm, label)
         clips[act.name] = partly + checks.verdicts(measured, None)
     return body_checks.misread_verdicts(clips) + rig_lines, clips
 
 
 def check_animal(
-    arm: bpy.types.Object, actions: list, animal: AnimalRig, strike: bool, enemy: bool
+    arm: bpy.types.Object,
+    actions: list,
+    animal: AnimalRig,
+    enemy: bool,
+    scene: bpy.types.Scene,
+    progress: Progress | None = None,
 ) -> tuple[list[str], dict[str, list[str]]]:
     """Rest-stance and per-clip lines for a four-legged rig or a hopper."""
     rig_lines = [
@@ -200,58 +228,91 @@ def check_animal(
         for end, r in animal.rest_widths.items()
         if r > 1.25
     ]
+    strike = scene.gaitkeeper.every_clip_strikes
     clips = {}
-    for act in actions:
+    for act in reported(actions, progress):
         _, verdict = creature.measure_clip(
-            arm, act, animal.legs, animal.pelvis, animal.hopper, animal.rest_widths, strike, enemy=enemy
+            arm, act, animal.legs, animal.pelvis, animal.hopper, animal.rest_widths, scene, strike, enemy=enemy
         )
         clips[act.name] = verdict
     return rig_lines, clips
 
 
-def run_check(arm: bpy.types.Object, settings) -> CheckResult:
-    """Check the armature's clips. Changes nothing: the current clip and frame are put back."""
+def run_check(
+    arm: bpy.types.Object,
+    scene: bpy.types.Scene,
+    view_layer: bpy.types.ViewLayer,
+    progress: Progress | None = None,
+) -> CheckResult:
+    """Check the armature's clips, telling `progress` as each clip starts. Changes nothing: the current clip
+    and frame are put back."""
     if not arm.data.bones:
         return CheckResult(armature=arm.name, kind="person", rig=[NO_BONES], clips={})
+    settings = scene.gaitkeeper
     legs = creature.find_legs(arm)
-    animal, hopper = body_kind(arm, legs, settings)
+    animal, hopper = body_kind(arm, legs, scene, view_layer)
     kind = ("hopper" if hopper else "animal") if animal else "person"
     actions = clips_to_check(arm, settings.current_only)
     enemy = settings.attacks_for == "ENEMY"
-    scene = bpy.context.scene
-    with kept_transforms(scene), kept_frame(scene), kept_action(arm):
+    with kept_transforms(scene, view_layer), kept_frame(scene), kept_action(arm):
         if not animal:
-            rig_lines, clips = check_person(arm, actions, enemy)
+            rig_lines, clips = check_person(arm, actions, enemy, scene, view_layer, progress)
         elif not legs:
             rig_lines, clips = ["FAIL no legs found: no bone chains reach the floor in the rest pose."], {}
         else:
             found = AnimalRig(legs, pelvis_bone(arm, legs), hopper, creature.rest_width(arm, legs))
-            rig_lines, clips = check_animal(arm, actions, found, settings.every_clip_strikes, enemy)
+            rig_lines, clips = check_animal(arm, actions, found, enemy, scene, progress)
     return CheckResult(armature=arm.name, kind=kind, rig=rig_lines, clips=clips)
 
 
-def fix_current_clip(arm: bpy.types.Object, settings) -> tuple[bpy.types.Action | None, dict]:
-    """Fix the current clip into a copy and make the copy current. Returns (copy or None, fix report)."""
+def fix_current_clip(
+    arm: bpy.types.Object,
+    scene: bpy.types.Scene,
+    view_layer: bpy.types.ViewLayer,
+    progress: Progress | None = None,
+) -> tuple[bpy.types.Action | None, dict]:
+    """Fix the current clip into a copy and make the copy current, telling `progress` as it starts.
+    Returns (copy or None, fix report)."""
     act = arm.animation_data.action
     if not animates(act, arm):
         return None, {"changes": [NOTHING_TO_MEND], "verdict": []}
-    scene = bpy.context.scene
-    animal = animal_rig(arm, settings)
+    animal = animal_rig(arm, scene, view_layer)
     if animal is None and checks.rig_report(arm, rig.role_map(arm))["missing"]:
         return None, {"changes": [], "verdict": [BONES_NOT_FOUND]}
-    with kept_transforms(scene, skip=arm), kept_frame(scene):
-        if animal is not None:
-            new, rep = creature_fix.fix_creature(
-                arm, act, animal.legs, animal.pelvis, animal.hopper, animal.rest_widths, settings.every_clip_strikes
-            )
-        else:
-            root = None if settings.root_motion == "LEAVE" else settings.root_motion.lower()
-            label = judged_label(arm, act, settings.attacks_for == "ENEMY")
-            fps = scene_fps(scene)
-            new, rep = edit.fix_clip(arm, act, rig.role_map(arm), fps, "loop" in act.name.lower(), root, label=label)
+    if progress is not None:
+        progress(0, 1, act.name)
+    with kept_transforms(scene, view_layer, skip=arm), kept_frame(scene):
+        new, rep = fixed_copy(arm, act, animal, scene, view_layer)
     if new is not None:
         rig.set_action(arm, new)
     return new, rep
+
+
+def fixed_copy(
+    arm: bpy.types.Object,
+    act: bpy.types.Action,
+    animal: AnimalRig | None,
+    scene: bpy.types.Scene,
+    view_layer: bpy.types.ViewLayer,
+) -> tuple[bpy.types.Action | None, dict]:
+    """The animal fix or the person fix of `act`, as the scene's settings ask."""
+    settings = scene.gaitkeeper
+    if animal is not None:
+        return creature_fix.fix_creature(
+            arm,
+            act,
+            animal.legs,
+            animal.pelvis,
+            animal.hopper,
+            animal.rest_widths,
+            scene,
+            view_layer,
+            settings.every_clip_strikes,
+        )
+    root = None if settings.root_motion == "LEAVE" else settings.root_motion.lower()
+    label = judged_label(arm, act, settings.attacks_for == "ENEMY")
+    cyclic = "loop" in act.name.lower()
+    return edit.fix_clip(arm, act, rig.role_map(arm), scene_fps(scene), cyclic, scene, view_layer, root, label=label)
 
 
 def fix_report_text(new: bpy.types.Action | None, rep: dict) -> str:

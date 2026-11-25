@@ -6,12 +6,15 @@ tests/test_blender_held_root.py:
 
 Check must read the body as it stands in the clips, not as its rest pose lies: no swapped legs, no knees bent
 backwards in the crouch, no units warning, the gliding walk still flagged, and the scene left exactly as it was.
+An animal exported in centimetres (100 times too big on screen) must measure exactly as the same animal in metres.
 Prints one "HELD ..." line per step and exits 1 on the first failure.
 """
 
 from __future__ import annotations
 
+import importlib
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import bpy
@@ -54,6 +57,25 @@ def build() -> bpy.types.Object:
     return arm
 
 
+def bird_walk(build: Callable[[], bpy.types.Object]) -> tuple[dict, list[str]]:
+    """A fresh bird walking with its feet in turn: the animal checks' (measures, report lines) for the walk."""
+    for ob in list(bpy.data.objects):
+        bpy.data.objects.remove(ob)
+    for act in list(bpy.data.actions):
+        bpy.data.actions.remove(act)
+    arm = build()
+    walk = demo_rig.key_strides(arm, "Walk", together=False)
+    if "Root" in arm.pose.bones:
+        demo_rig.hold_root(arm, walk)
+    step(f"check {arm.name}", bpy.ops.gaitkeeper.check() == {"FINISHED"})
+    package = "bl_ext.user_default.gaitkeeper"
+    runner = importlib.import_module(f"{package}.runner")
+    creature = importlib.import_module(f"{package}.core.creature")
+    scene, view_layer = bpy.context.scene, bpy.context.view_layer
+    animal = runner.animal_rig(arm, scene, view_layer)
+    return creature.measure_clip(arm, walk, animal.legs, animal.pelvis, animal.hopper, animal.rest_widths, scene)
+
+
 if __name__ == "__main__":
     zip_path = sys.argv[sys.argv.index("--") + 1]
     bpy.ops.extensions.package_install_files(filepath=zip_path, repo="user_default", enable_on_install=True)
@@ -71,4 +93,6 @@ if __name__ == "__main__":
     idle = next(line for line in lines if line.endswith("  Idle"))
     step("idle not failed", not idle.startswith("FAIL"), idle)
     step("scene unchanged", rig_print(arm) == before)
+    in_metres, in_centimetres = bird_walk(demo_rig.build_bird), bird_walk(demo_rig.build_centimetre_bird)
+    step("animal read in metres", in_centimetres == in_metres, f"{in_metres[0]} vs {in_centimetres[0]}")
     print("HELD PASSED")

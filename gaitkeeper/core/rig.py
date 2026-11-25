@@ -294,6 +294,11 @@ def metres_per_unit(arm: bpy.types.Object, hips: str | None) -> float:
     return 1 / root_scale if undoes else 1.0
 
 
+def metres_world(arm: bpy.types.Object, hips: str | None) -> Matrix:
+    """The armature's world matrix scaled to metres (metres_per_unit), for reading bone positions."""
+    return Matrix.Scale(metres_per_unit(arm, hips), 4) @ arm.matrix_world
+
+
 def clip_range(act: bpy.types.Action) -> tuple[int, int]:
     a, b = act.frame_range
     return math.floor(a + 1e-4), math.ceil(b - 1e-4)
@@ -365,11 +370,11 @@ NEXT_JOINT = {
 }
 
 
-def sample(arm: bpy.types.Object, act: bpy.types.Action, roles: dict[str, str]) -> Sample:
+def sample(arm: bpy.types.Object, act: bpy.types.Action, roles: dict[str, str], scene: bpy.types.Scene) -> Sample:
+    """Play the clip on `scene` frame by frame and record the pose; the clip is left current."""
     set_action(arm, act)
     s = Sample()
     a, b = clip_range(act)
-    scn = bpy.context.scene
     rest = rest_space(arm, roles.get("hips"))
     s.roles = dict(roles)
     s.metres = metres_per_unit(arm, roles.get("hips"))
@@ -387,7 +392,7 @@ def sample(arm: bpy.types.Object, act: bpy.types.Action, roles: dict[str, str]) 
             if d.length > 1e-6:
                 s.rest_axis[here] = tuple(d.normalized())
     for f in range(a, b + 1):
-        scn.frame_set(f)
+        scene.frame_set(f)
         fr = {}
         wq = {}
         for pb in arm.pose.bones:

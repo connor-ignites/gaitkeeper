@@ -188,7 +188,9 @@ def write_action(arm: bpy.types.Object, frames: list[dict], name: str) -> bpy.ty
     return act
 
 
-def rotate_about(pb: bpy.types.PoseBone, axis: Vector, deg: float, arm: bpy.types.Object) -> None:
+def rotate_about(
+    pb: bpy.types.PoseBone, axis: Vector, deg: float, arm: bpy.types.Object, view_layer: bpy.types.ViewLayer
+) -> None:
     """Rotate a pose bone about a world axis through its head, keeping children attached."""
     if abs(deg) < 1e-4:
         return
@@ -197,7 +199,7 @@ def rotate_about(pb: bpy.types.PoseBone, axis: Vector, deg: float, arm: bpy.type
     R = Quaternion(ax, math.radians(deg)).to_matrix().to_4x4()
     h = pb.head.copy()
     pb.matrix = Matrix.Translation(h) @ R @ Matrix.Translation(-h) @ pb.matrix
-    bpy.context.view_layer.update()
+    view_layer.update()
 
 
 def world_pass(
@@ -209,6 +211,8 @@ def world_pass(
     fps: float,
     cyclic: bool,
     floor: dict[str, float],
+    scene: bpy.types.Scene,
+    view_layer: bpy.types.ViewLayer,
 ) -> None:
     world_ops = [op for op in ops if op["op"] in ("lean", "head", "pelvis", "bounce")]
     limp = any("limp_hurt" in p for p in per_frame)
@@ -223,12 +227,11 @@ def world_pass(
         names = [roles.get(f"{r}_{side}") for r in ("thigh", "calf", "foot")]
         if all(names):
             legs.append(tuple(arm.pose.bones[nm] for nm in names))  # type: ignore[index]
-    scn = bpy.context.scene
     n = len(per_frame)
     # pelvis heights of the (time-edited) motion, for bounce
     hz = []
     for f in range(n):
-        scn.frame_set(f)
+        scene.frame_set(f)
         hz.append(hips.head.z if hips else 0.0)
     mean_z = sum(hz) / max(1, len(hz))
     spine = [arm.pose.bones[roles[r]] for r in ("spine1", "spine2", "spine3") if r in roles]
@@ -248,6 +251,7 @@ def world_pass(
             floor,
             roles,
             orig_z,
+            scene,
             0.08 if any(op["op"] == "lock_feet" for op in ops) else None,
         )
         if lock
@@ -264,7 +268,7 @@ def world_pass(
         return foot.matrix.to_3x3().to_4x4()
 
     for f in range(n):
-        scn.frame_set(f)
+        scene.frame_set(f)
         plant = {
             foot.name: (targets[foot.name][f] if lock else foot.head.copy(), foot_rot(foot, f)) for _, _, foot in legs
         }
@@ -276,21 +280,21 @@ def world_pass(
                 d = op.get("dir", "forward")
                 axis, sign = {"forward": (right, -1), "back": (right, 1), "left": (fwd, -1), "right": (fwd, 1)}[d]
                 for pb in spine:
-                    rotate_about(pb, axis, sign * deg, arm)
+                    rotate_about(pb, axis, sign * deg, arm, view_layer)
             elif k == "head" and headb:
                 deg = float(op.get("degrees", 0)) / len(headb)
                 for pb in headb:
-                    rotate_about(pb, right, -deg, arm)
+                    rotate_about(pb, right, -deg, arm, view_layer)
             elif k == "pelvis" and hips:
                 drop = float(op.get("drop", 0))
                 hips.matrix = Matrix.Translation(inv.to_3x3() @ Vector((0, 0, -drop))) @ hips.matrix
-                bpy.context.view_layer.update()
+                view_layer.update()
                 moved_hips = True
             elif k == "bounce" and hips:
                 fac = float(op.get("factor", 1))
                 dz = (hz[f] - mean_z) * (fac - 1)
                 hips.matrix = Matrix.Translation(Vector((0, 0, dz))) @ hips.matrix
-                bpy.context.view_layer.update()
+                view_layer.update()
                 moved_hips = True
         if limp and spine:
             p = per_frame[f]
@@ -298,15 +302,15 @@ def world_pass(
             toward = "left" if p.get("limp_side", 0.0) < 0.5 else "right"
             axis, sign = (fwd, -1) if toward == "left" else (fwd, 1)
             for pb in spine:
-                rotate_about(pb, axis, sign * 9 * a * w / len(spine), arm)
+                rotate_about(pb, axis, sign * 9 * a * w / len(spine), arm, view_layer)
             if hips:  # the body dips onto the hurt leg and hurries off it
                 hips.matrix = Matrix.Translation(Vector((0, 0, -0.025 * a * w))) @ hips.matrix
-                bpy.context.view_layer.update()
+                view_layer.update()
                 moved_hips = True
         if moved_hips:
             for thigh, calf, foot in legs:
                 tgt, rot = plant[foot.name]
-                two_bone_ik(arm, thigh, calf, foot, tgt, rot)
+                two_bone_ik(arm, thigh, calf, foot, tgt, rot, view_layer)
         for pb in arm.pose.bones:
             pb.keyframe_insert("location", frame=f, group=pb.name)
             key_rotation(pb, f)
@@ -318,16 +322,19 @@ def fix_clip(
     roles: dict[str, str],
     fps: float,
     cyclic: bool,
+    scene: bpy.types.Scene,
+    view_layer: bpy.types.ViewLayer,
     root_motion: str | None = None,
     name: str | None = None,
     label: str | None = None,
 ) -> tuple[bpy.types.Action | None, dict]:
     """The standard fix on a COPY of the clip: feet re-planted (nudged at most 8 cm), the loop seam
-    closed, pops smoothed (the clip's own too), root motion extracted or removed if asked. The original
-    is never touched. Returns (new action, report); the new action is None (and deleted) if the fix made
-    anything worse that the checks call a FAIL."""
+    closed, pops smoothed (the clip's own too), root motion extracted or removed if asked. The clip is
+    played on `scene`; bone edits are evaluated through `view_layer`. The original is never touched.
+    Returns (new action, report); the new action is None (and deleted) if the fix made anything worse that
+    the checks call a FAIL."""
     label = label or act.name
-    before = sample(arm, act, roles)
+    before = sample(arm, act, roles, scene)
     report: dict = {"original": measure(before, fps, cyclic, arm, label)}
     if report["original"].get("travels"):
         cyclic = False  # a travelling loop keeps its seam: blending end into start would undo the travel
@@ -335,8 +342,8 @@ def fix_clip(
         src = act.copy()
         try:
             set_action(arm, src)
-            smooth_pops(arm, report["original"]["pops"], len(before.world), clip_range(act)[0])
-            before = sample(arm, src, roles)
+            smooth_pops(arm, report["original"]["pops"], len(before.world), scene, clip_range(act)[0])
+            before = sample(arm, src, roles, scene)
         finally:
             set_action(arm, act)
             bpy.data.actions.remove(src)
@@ -348,16 +355,16 @@ def fix_clip(
         fb = roles.get(f"foot_{side}")
         if fb and f"ankle_{side}" in before.world[0]:
             floor[fb] = min(w[f"ankle_{side}"][2] for w in before.world)
-    world_pass(arm, new, ops, per_frame, roles, fps, cyclic, floor)
+    world_pass(arm, new, ops, per_frame, roles, fps, cyclic, floor, scene, view_layer)
     if root_motion in ("extract", "in_place"):
-        notes.append(root_motion_pass(arm, roles, len(frames), root_motion))
-    report["result"] = measure(sample(arm, new, roles), fps, cyclic, arm, label)
+        notes.append(root_motion_pass(arm, roles, len(frames), root_motion, scene, view_layer))
+    report["result"] = measure(sample(arm, new, roles, scene), fps, cyclic, arm, label)
     for _ in range(3):  # smooth every pop left (the clip's own and any the fix made), measure again
         fresh = dict(report["result"]["pops"])
         if not fresh:
             break
-        smooth_pops(arm, fresh, len(frames))
-        report["result"] = measure(sample(arm, new, roles), fps, cyclic, arm, label)
+        smooth_pops(arm, fresh, len(frames), scene)
+        report["result"] = measure(sample(arm, new, roles, scene), fps, cyclic, arm, label)
     notes.append("feet re-planted" + (", loop seam closed" if cyclic else ""))
     report["changes"] = notes
     report["verdict"] = verdicts(report["original"], report["result"], fixing=True)

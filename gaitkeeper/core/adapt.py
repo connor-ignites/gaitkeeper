@@ -177,6 +177,8 @@ def adapt_clip(
     fps: float,
     frame: int,
     edited: Pose,
+    scene: bpy.types.Scene,
+    view_layer: bpy.types.ViewLayer,
     mode: str = "whole",
     spread: float = 6,
     mirror: bool = True,
@@ -188,11 +190,11 @@ def adapt_clip(
 ) -> tuple[bpy.types.Action, dict]:
     """Bake edited poses into a copy of `act`: the pose on screen at scene frame `frame`, plus any kept
     poses `more` ((frame, pose) pairs; the one on screen wins on its own frame). Returns (copy, report).
+    The clip is played on `scene`; bone edits are evaluated through `view_layer`.
     `judge(action) -> verdict lines` checks an animal (roles from creature.leg_roles); None: a person,
     judged by the person checks."""
-    scene = bpy.context.scene
     a, poses = _poses_in_clip(act, mode, frame, edited, more)
-    before = sample(arm, act, roles)
+    before = sample(arm, act, roles, scene)
     keys = _edit_keys(poses, before, a)
     if cyclic is None:
         cyclic = "loop" in act.name.lower()
@@ -211,10 +213,10 @@ def adapt_clip(
     orig_feet = _foot_matrices(arm, scene, legs, roles, a, sp.n) if keep_feet else {}
     new = write_action(arm, frames, name or f"{act.name.split('|')[-1]}_adapted")
     if keep_feet and legs:
-        _keep_feet(arm, scene, legs, orig_feet, before, roles, sp.n, fps, cyclic and not travels, touched)
+        _keep_feet(arm, scene, view_layer, legs, orig_feet, before, roles, sp.n, fps, cyclic and not travels, touched)
         report["notes"] += _feet_notes(legs, leg_sides(roles))
     if judge is None:
-        _judge_person(report, arm, act, new, roles, fps, cyclic, sp.n)
+        _judge_person(report, arm, act, new, roles, fps, cyclic, sp.n, scene)
     else:
         _judge_animal(report, act, new, judge)
     report["pose_kept_deg"] = _pose_kept_deg(arm, scene, new, keys)
@@ -500,15 +502,16 @@ def _judge_person(
     fps: float,
     cyclic: bool,
     n: int,
+    scene: bpy.types.Scene,
 ) -> None:
     """Measure the copy with the person checks, smoothing any snaps the edit added, and list what got worse."""
-    report["result"] = measure(sample(arm, new, roles), fps, cyclic, arm, act.name)
+    report["result"] = measure(sample(arm, new, roles, scene), fps, cyclic, arm, act.name)
     for _ in range(3):  # an edit must not add snaps: smooth any new pops, then measure again
         fresh = {bn: f for bn, f in report["result"]["pops"].items() if bn not in report["original"]["pops"]}
         if not fresh:
             break
-        smooth_pops(arm, fresh, n)
-        report["result"] = measure(sample(arm, new, roles), fps, cyclic, arm, act.name)
+        smooth_pops(arm, fresh, n, scene)
+        report["result"] = measure(sample(arm, new, roles, scene), fps, cyclic, arm, act.name)
     report["verdict"] = verdicts(report["original"], report["result"], fixing=True)
     was = verdicts(report["original"], None)
     report["worse"] = [v for v in report["verdict"] if v.startswith(("FAIL", "WARN")) and v not in was]
@@ -543,6 +546,7 @@ class _Feet:
 
     arm: bpy.types.Object
     scene: bpy.types.Scene
+    view_layer: bpy.types.ViewLayer
     legs: list[Leg]
     roles: dict[str, str]
     orig_feet: dict[str, list[Matrix]]
@@ -553,6 +557,7 @@ class _Feet:
 def _keep_feet(
     arm: bpy.types.Object,
     scene: bpy.types.Scene,
+    view_layer: bpy.types.ViewLayer,
     legs: list[Leg],
     orig_feet: dict[str, list[Matrix]],
     before: Sample,
@@ -568,7 +573,7 @@ def _keep_feet(
     keeps its original toe angle (unless the foot itself was turned): planted it stays flat, so a bent
     knee doesn't dig the toes in, and swinging it doesn't dangle toes-down.
     Off the ground, a touched foot goes where the new pose puts it, keeping its toe clearance."""
-    ft = _Feet(arm, scene, legs, roles, orig_feet, n, am.loop_frames(n, cyclic))
+    ft = _Feet(arm, scene, view_layer, legs, roles, orig_feet, n, am.loop_frames(n, cyclic))
     floor, plan = _foot_plans(ft, before, fps, cyclic, touched)
     new_pos = _foot_heads(ft, plan)
     targets = {
@@ -705,7 +710,7 @@ def _place_legs(ft: _Feet, goal: dict[str, list[tuple[Vector, Matrix]]], lift: d
             turn = mm.q_angle_deg(tuple(fb.matrix.to_quaternion()), tuple(rot.to_quaternion()))
             if off < 5e-4 and turn < 0.1:
                 continue
-            two_bone_ik(ft.arm, pb[thigh], pb[calf], fb, target, rot)
+            two_bone_ik(ft.arm, pb[thigh], pb[calf], fb, target, rot, ft.view_layer)
             for bone in (pb[thigh], pb[calf], fb):
                 key_rotation(bone, f)
                 bone.keyframe_insert("location", frame=f, group=bone.name)

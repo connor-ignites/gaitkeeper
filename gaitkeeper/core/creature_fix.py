@@ -47,6 +47,8 @@ def legs_in_line(
     legs: dict[str, list[str]],
     fwd: Vector,
     which: tuple[str, ...],
+    scene: bpy.types.Scene,
+    view_layer: bpy.types.ViewLayer,
     keep: float = 0.0,
 ) -> bpy.types.Action:
     """Joint by joint, top down: turn the bone above each middle joint about the line from its top
@@ -59,7 +61,7 @@ def legs_in_line(
     inv = mw.inverted()
     a, b = round(new.frame_range[0]), round(new.frame_range[1])
     for f in range(a, b + 1):
-        bpy.context.scene.frame_set(f)
+        scene.frame_set(f)
         for key, names in legs.items():
             if not key.startswith(which):
                 continue
@@ -83,9 +85,9 @@ def legs_in_line(
                 hold = mw @ pbs[k + 1].matrix
                 turn = Matrix.Translation(pivot) @ Matrix.Rotation(th, 4, axis) @ Matrix.Translation(-pivot)
                 pbs[k - 1].matrix = inv @ (turn @ (mw @ pbs[k - 1].matrix))
-                bpy.context.view_layer.update()
+                view_layer.update()
                 pbs[k + 1].matrix = inv @ hold
-                bpy.context.view_layer.update()
+                view_layer.update()
                 touched |= {k - 1, k, k + 1}
             for k in sorted(touched):
                 key_rotation(pbs[k], f)
@@ -103,12 +105,14 @@ def fix_creature(
     pelvis: str,
     hopper: bool,
     rest: dict[str, float],
+    scene: bpy.types.Scene,
+    view_layer: bpy.types.ViewLayer,
     strike: bool = False,
     name: str | None = None,
 ) -> tuple[bpy.types.Action | None, dict]:
     """The animal fix on a COPY: bowed legs brought into line. Returns (copy or None, report). None when
     nothing needs it, or when the fix made anything worse (the copy is then deleted)."""
-    m0, v0 = CR.measure_clip(arm, act, legs, pelvis, hopper, rest, strike)
+    m0, v0 = CR.measure_clip(arm, act, legs, pelvis, hopper, rest, scene, strike)
     bowed = [k for k, v in m0["legs"].items() if v["bow_share"] > LG.BOW_WARN.get(k.split("_")[0], 0.08)]
     report: dict = {"before": v0, "changes": []}
     if not bowed:
@@ -120,9 +124,9 @@ def fix_creature(
         set_action(arm, act)
         return None, report
     fwd = body_axes(arm, CR.leg_roles(arm, legs, pelvis))[0]
-    new = legs_in_line(arm, act, legs, fwd, tuple(bowed))
+    new = legs_in_line(arm, act, legs, fwd, tuple(bowed), scene, view_layer)
     new.name = name or f"{act.name.split('|')[-1]}_fixed"
-    m1, v1 = CR.measure_clip(arm, new, legs, pelvis, hopper, rest, strike)
+    m1, v1 = CR.measure_clip(arm, new, legs, pelvis, hopper, rest, scene, strike)
     for k in bowed:
         side = "left" if k.endswith("_l") else "right"
         report["changes"].append(

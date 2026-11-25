@@ -12,7 +12,7 @@ hundredth of the size (face down) while every frame stands up at normal size. Ke
 then hold_root.
 
 build_bird makes a two-legged animal with a tail; key_strides swings its legs in turn (an emu) or together
-(a kangaroo).
+(a kangaroo). build_centimetre_bird makes the same bird the way a Unity export in centimetres arrives.
 """
 
 from __future__ import annotations
@@ -73,6 +73,11 @@ def unity_point(p: Point) -> Point:
     return (p[0] * UNITY_UNIT, p[1] * UNITY_UNIT, p[2] * UNITY_UNIT)
 
 
+def centimetre_point(p: Point) -> Point:
+    """A body point in centimetres, as a Unity export in centimetres rests it."""
+    return (p[0] * UNITY_SCALE, p[1] * UNITY_SCALE, p[2] * UNITY_SCALE)
+
+
 def make_armature(
     name: str, bones: dict, place: Callable[[Point], Point] = same_point, root: str | None = None
 ) -> bpy.types.Object:
@@ -124,6 +129,17 @@ def build_unity_rig(name: str = "UnityPerson") -> bpy.types.Object:
     hold_root turns back -90 and scales 100 times in every clip."""
     arm = build_rig(name, unity_point, root="Root")
     arm.rotation_euler = (math.radians(90), 0, 0)
+    arm.pose.bones["Root"].rotation_mode = "QUATERNION"
+    return arm
+
+
+def build_centimetre_bird(name: str = "CentimetreBird") -> bpy.types.Object:
+    """The bird as a Unity export in centimetres reaches Blender: bones in centimetres, the object at 0.01 and
+    turned +90 degrees about X, and a Root bone that hold_root turns back and scales 100 times. Every frame then
+    stands the body up 100 times too big on screen (centimetres), which the checks read back in metres."""
+    arm = make_armature(name, BIRD_BONES, centimetre_point, root="Root")
+    arm.rotation_euler = (math.radians(90), 0, 0)
+    arm.scale = (UNITY_UNIT,) * 3
     arm.pose.bones["Root"].rotation_mode = "QUATERNION"
     return arm
 

@@ -38,7 +38,7 @@ def _is_control(name: str) -> bool:
     return any(w.startswith(c) for w in words for c in CONTROL_WORDS)
 
 
-def skin_report(arm: bpy.types.Object, roles: dict[str, str]) -> dict:
+def skin_report(arm: bpy.types.Object, roles: dict[str, str], view_layer: bpy.types.ViewLayer) -> dict:
     meshes = _meshes(arm)
     out: dict = {"meshes": [m.name for m in meshes]}
     if not meshes:
@@ -79,7 +79,7 @@ def skin_report(arm: bpy.types.Object, roles: dict[str, str]) -> dict:
         control_bones_deforming=sorted(control_deform),
         preserve_volume=all(preserve) if preserve else None,
     )
-    out["bend_test"] = bend_test(arm, roles, meshes)
+    out["bend_test"] = bend_test(arm, roles, meshes, view_layer)
     return out
 
 
@@ -97,8 +97,9 @@ def _skin_near(
     return picked
 
 
-def _evaluated_positions(meshes: list) -> dict:
-    dg = bpy.context.evaluated_depsgraph_get()
+def _evaluated_positions(meshes: list, view_layer: bpy.types.ViewLayer) -> dict:
+    """Every mesh's deformed vertices in world space, read from the view layer (updated by the caller)."""
+    dg = view_layer.depsgraph
     out = {}
     for ob in meshes:
         ev = ob.evaluated_get(dg)
@@ -108,7 +109,7 @@ def _evaluated_positions(meshes: list) -> dict:
     return out
 
 
-def bend_test(arm: bpy.types.Object, roles: dict[str, str], meshes: list) -> dict:
+def bend_test(arm: bpy.types.Object, roles: dict[str, str], meshes: list, view_layer: bpy.types.ViewLayer) -> dict:
     """Bend each elbow and knee 90 degrees the anatomical way, and measure how much the skin
     within reach of the joint pulls in towards it (the joint collapsing or pinching)."""
     fwd, _, _ = body_axes(arm, roles)
@@ -130,8 +131,8 @@ def bend_test(arm: bpy.types.Object, roles: dict[str, str], meshes: list) -> dic
     for pb in arm.pose.bones:
         pb.rotation_mode = "QUATERNION"
         pb.location, pb.rotation_quaternion, pb.scale = (0, 0, 0), (1, 0, 0, 0), (1, 1, 1)
-    bpy.context.view_layer.update()
-    rest = _evaluated_positions(meshes)
+    view_layer.update()
+    rest = _evaluated_positions(meshes, view_layer)
     out = {}
     for joint, up_role, low_role, sign in (
         ("knee_l", "thigh_l", "calf_l", -1),
@@ -156,10 +157,10 @@ def bend_test(arm: bpy.types.Object, roles: dict[str, str], meshes: list) -> dic
         local_axis = (mw.to_3x3() @ lb.matrix_local.to_3x3()).inverted() @ axis.normalized()
         pb = arm.pose.bones[low]
         pb.rotation_quaternion = Quaternion(local_axis, 1.5708)
-        bpy.context.view_layer.update()
-        bent = _evaluated_positions(meshes)
+        view_layer.update()
+        bent = _evaluated_positions(meshes, view_layer)
         pb.rotation_quaternion = (1, 0, 0, 0)
-        bpy.context.view_layer.update()
+        view_layer.update()
         before = sum((rest[o.name][i] - centre).length for o, i in verts) / len(verts)
         after = sum((bent[o.name][i] - centre).length for o, i in verts) / len(verts)
         out[joint] = {"vertices": len(verts), "shrink": round(1 - after / before, 3) if before > 0 else 0.0}
@@ -169,7 +170,7 @@ def bend_test(arm: bpy.types.Object, roles: dict[str, str], meshes: list) -> dic
         pb.location, pb.rotation_quaternion, pb.rotation_euler, pb.scale = loc, q, e, sc
     if arm.animation_data:
         arm.animation_data.action = saved_action
-    bpy.context.view_layer.update()
+    view_layer.update()
     return out
 
 
