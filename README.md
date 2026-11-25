@@ -2,6 +2,8 @@
 
 A free Blender add-on that checks your animation clips for the faults players notice: feet that slide or sink, knees that bend the wrong way, loops that hitch, one-frame pops. Each clip gets PASS, WARN or FAIL with a plain-English reason.
 
+**Beta.** Check only reads your clips. Fix and Pose Adapt write a new copy of a clip and never change the original, and both can be undone. Still, save your work (or use version control) before trying any new tool on a project you care about.
+
 ![A walk with pops and sliding feet, before and after GaitKeeper's fix](docs/media/hero-walk-pops-and-skating.gif)
 
 *A clean walk with faults added on purpose (top), and the same clip after Fix (bottom). Test clip: Quaternius Universal Animation Library, CC0.*
@@ -61,6 +63,10 @@ Treat a WARN as a place to look. Some are deliberate: a knockback is meant to be
 
 ![A punch where the forearm and hand snap in one frame, before and after](docs/media/punch-pop.gif)
 
+![A kangaroo hop with one hind knee bowed out, before and after Fix](docs/media/kangaroo-leg-bow.gif)
+
+*Animals: a kangaroo landing with one hind knee bowed 25 degrees out on purpose. Check measured the knee 18 cm off the hip-to-foot line; after Fix it is 1.2 cm. The kangaroo model was made with Meshy (AI) and rigged by hand.*
+
 ## Pose Adapt
 
 Pose some bones on one frame (without keying them) and press **Adapt clip to this pose**. The change is baked into a copy, spread over the whole clip, over the same moment of every step (mirrored on the other foot), or only around that frame. Feet you didn't touch stay planted. To change several frames, pose one and press **Keep this pose**, then the next, then Adapt.
@@ -78,18 +84,29 @@ Pose some bones on one frame (without keying them) and press **Adapt clip to thi
 
 ## Rigs it has been run on
 
-- Quaternius Universal Animation Library 1 and 2 (CC0), every clip.
-- Commercial game packs: a Border Collie (four legs), a kangaroo (hopper), humanoid packs with a constant root bone above the hips, and Unity's Starter Assets character.
-- Small rigs built in code for the tests.
+Before this release, Check ran on every clip of each rig below, and Fix on up to three flagged clips per rig. Nothing crashed, and no original clip changed.
+
+| Rig | Clips | Read as | Result |
+| --- | --- | --- | --- |
+| Quaternius UAL 1 (CC0) | 119 | person | 63 pass, 50 warn, 6 fail |
+| Quaternius UAL 2 (CC0) | 42 | person | 16 pass, 26 warn, 0 fail |
+| Quaternius UAL 2, root-motion version | 42 | person | 19 pass, 23 warn, 0 fail |
+| A commercial Border Collie pack | 112 | animal | 110 pass, 2 warn, 0 fail |
+| A hand-rigged kangaroo | 4 | hopper | 4 warn |
+| A huntsman spider (eight legs) | 7 | animal | 5 pass, 2 warn |
+
+The tests also run on small rigs built in code, including the odd cases: empty and one-frame clips, NLA-only animation, shape-key clips, scaled and rotated rigs, Japanese bone names, linked rigs with a library override, and an armature with no bones.
 
 Clip names matter. GaitKeeper reads words like `walk`, `run`, `loop`, `punch` and `kick` in a clip's name to decide which checks apply, so `Run_Loop` is judged as a looping run and `Attack_02` as an attack.
 
 ## Known limits
 
-- It finds bones by name (Mixamo-style, Unreal-style, `.L`/`.R` and similar). An unusual naming scheme may need the Body setting set by hand, and a rig with a bone named "tail" is treated as an animal on Auto.
+- It finds bones by name (Mixamo-style, Unreal-style, `.L`/`.R` and similar). An unusual naming scheme may need the Body setting set by hand, and a rig with a bone named "tail" is treated as an animal on Auto. A two-legged bird with a tail bone reads as a hopper; set Hopper to No.
+- Rigs that keep a fixed rotation and a 100x scale on a root bone above the hips (some commercial packs exported from Unity) are misread: knees show as bent backwards and the legs as swapped. The report says the reading is past anything a body can do and may be the tool's mistake, and Fix refuses these clips. Proper support is planned.
 - Check clips takes every action in the file that keys this armature's bones. Two characters with the same bone names in one file will pick up each other's clips; tick **Current clip only** there.
 - Feet are judged against a flat floor. A clip authored on a slope or on stairs will read as sinking or floating.
-- Each clip is played frame by frame through Blender, so a heavy scene with high-poly meshes is slow to check.
+- Each clip is played frame by frame through Blender, so a heavy scene with high-poly meshes is slow to check. On a light rig, Check and Fix together take about 11 seconds for a 1000-frame clip.
+- Fix refuses rather than guesses: on a rig whose bones it can't name, on a clip with no keys on the rig, or when its result checks worse than the original. A refusal leaves nothing behind.
 - The thresholds come from motion-capture data and real footage of people, dogs and kangaroos. They suit realistic and semi-realistic motion. Cartoon timing and squash will get more WARNs, because exaggerated motion breaks the same rules a broken clip does.
 - Fix handles feet, seams, pops and root motion. It won't repair a bad pose or bad timing; it tells you where they are.
 
@@ -129,6 +146,6 @@ Pull requests are welcome. Keep `ruff check`, `ruff format --check` and `pytest`
 
 ## Licence
 
-GPL-3.0-or-later, like Blender. See [LICENSE](LICENSE).
+GPL-3.0-or-later, like Blender. See [LICENSE](LICENSE). As the licence says, GaitKeeper comes with no warranty: it is provided "as is", and you use it at your own risk.
 
-The demo clips use the Quaternius Universal Animation Library, which is CC0. No model or animation files are included in this repository.
+The humanoid demo clips use the Quaternius Universal Animation Library, which is CC0. No model or animation files are included in this repository.
