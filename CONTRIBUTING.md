@@ -13,7 +13,7 @@ You need Python 3.11 or newer, and Blender 4.2 or newer for the Blender tests.
 ```sh
 git clone https://github.com/connor-ignites/gaitkeeper
 cd gaitkeeper
-python -m pip install ruff pytest
+python -m pip install ruff==0.17.6 pytest==9.2.0
 pytest                                    # maths tests; Blender tests skip without Blender
 BLENDER=/path/to/blender pytest           # everything, including install, Check, Fix and safety tests
 python scripts/build.py                   # builds dist/gaitkeeper-<version>.zip

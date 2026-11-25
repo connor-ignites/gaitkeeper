@@ -119,7 +119,7 @@ Clip names matter. GaitKeeper reads words like `walk`, `run`, `loop`, `punch` an
 ## Building and testing
 
 ```sh
-python -m pip install ruff pytest
+python -m pip install ruff==0.17.6 pytest==9.2.0
 ruff check . && ruff format --check .
 BLENDER=/path/to/blender pytest     # without BLENDER (or blender on PATH) only the maths tests run
 python scripts/build.py             # builds and validates dist/gaitkeeper-<version>.zip
