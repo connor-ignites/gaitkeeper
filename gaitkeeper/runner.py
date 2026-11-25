@@ -19,6 +19,15 @@ REPORT_NAME = "GaitKeeper report"
 POSE_CLIP = re.compile(r"(^|[^a-z0-9])[ta][ _-]?pose([^a-z0-9]|$)")  # T-pose and A-pose clips, never checked
 TAIL = re.compile(r"(^|[^a-z])tail")  # "Tail_01", "tail.L"; not "ponytail"
 BONE_PATH = re.compile(r'pose\.bones\["([^"]+)"\]')
+NO_BONES = "FAIL this armature has no bones, so there is nothing to check."
+NOT_FULLY_CHECKED = (
+    "WARN not fully checked: some of this rig's bones weren't found (see Skeleton and skin), "
+    "so the checks that need them were skipped."
+)
+NOTHING_TO_MEND = "nothing to mend: this clip has no keys on this rig's bones"
+BONES_NOT_FOUND = (
+    "REFUSED some of this rig's bones weren't found, so a fix could move the wrong ones. Press Check to see which."
+)
 
 
 class AnimalRig(NamedTuple):
@@ -165,13 +174,16 @@ def check_person(arm: bpy.types.Object, actions: list, enemy: bool) -> tuple[lis
     roles = rig.role_map(arm)
     fps = scene_fps(bpy.context.scene)
     saved_file = bpy.data.filepath.lower().endswith(".blend")
-    rig_lines = checks.rig_verdicts(checks.rig_report(arm, roles), None)
+    report = checks.rig_report(arm, roles)
+    rig_lines = checks.rig_verdicts(report, None)
     rig_lines += skin.skin_verdicts(skin.skin_report(arm, roles), saved_file)
+    # a clip on a rig whose bones weren't all found can't honestly PASS
+    partly = [NOT_FULLY_CHECKED] if report["missing"] else []
     clips = {}
     for act in actions:
         label = judged_label(arm, act, enemy)
         measured = checks.measure(rig.sample(arm, act, roles), fps, "loop" in act.name.lower(), arm, label)
-        clips[act.name] = checks.verdicts(measured, None)
+        clips[act.name] = partly + checks.verdicts(measured, None)
     return body_checks.misread_verdicts(clips) + rig_lines, clips
 
 
@@ -197,6 +209,8 @@ def check_animal(
 
 def run_check(arm: bpy.types.Object, settings) -> CheckResult:
     """Check the armature's clips. Changes nothing: the current clip and frame are put back."""
+    if not arm.data.bones:
+        return CheckResult(armature=arm.name, kind="person", rig=[NO_BONES], clips={})
     legs = creature.find_legs(arm)
     animal, hopper = body_kind(arm, legs, settings)
     kind = ("hopper" if hopper else "animal") if animal else "person"
@@ -217,8 +231,12 @@ def run_check(arm: bpy.types.Object, settings) -> CheckResult:
 def fix_current_clip(arm: bpy.types.Object, settings) -> tuple[bpy.types.Action | None, dict]:
     """Fix the current clip into a copy and make the copy current. Returns (copy or None, fix report)."""
     act = arm.animation_data.action
+    if not animates(act, arm):
+        return None, {"changes": [NOTHING_TO_MEND], "verdict": []}
     scene = bpy.context.scene
     animal = animal_rig(arm, settings)
+    if animal is None and checks.rig_report(arm, rig.role_map(arm))["missing"]:
+        return None, {"changes": [], "verdict": [BONES_NOT_FOUND]}
     with kept_transforms(scene, skip=arm), kept_frame(scene):
         if animal is not None:
             new, rep = creature_fix.fix_creature(

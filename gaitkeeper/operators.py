@@ -71,9 +71,9 @@ the original is not changed"""
         runner.write_report(runner.fix_report_text(new, rep))
         changes = rep.get("changes", [])
         if new is None:
-            nothing = bool(changes) and "nothing to mend" in changes[0]
-            why = "nothing to mend in this clip" if nothing else "the fix made the clip worse, so it was thrown away"
-            self.report({"WARNING"}, f"GaitKeeper: {why}. See the report.")
+            refused = [v.removeprefix("REFUSED ") for v in rep["verdict"] if v.startswith("REFUSED ")]
+            why = changes[0] if changes and "nothing to mend" in changes[0] else (refused or ["no fix made"])[0]
+            self.report({"WARNING"}, f"GaitKeeper: {why.rstrip('.')}. See the report.")
             return {"CANCELLED"}
         self.report({"INFO"}, f"GaitKeeper: made {new.name} ({'; '.join(changes)}). Press Check to see it.")
         return {"FINISHED"}
