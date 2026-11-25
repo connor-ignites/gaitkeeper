@@ -1,0 +1,50 @@
+name: Bug report
+description: GaitKeeper crashed, judged a clip wrongly, or Fix did something unexpected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The rig and the report text are what let us reproduce it.
+  - type: input
+    id: blender
+    attributes:
+      label: Blender version
+      description: Help > About, for example 4.2.3 LTS or 5.2.3.
+    validations:
+      required: true
+  - type: input
+    id: gaitkeeper
+    attributes:
+      label: GaitKeeper version
+      description: Edit > Preferences > Get Extensions, GaitKeeper.
+    validations:
+      required: true
+  - type: textarea
+    id: rig
+    attributes:
+      label: Rig and clip
+      description: |
+        Where the rig comes from (a free pack with a link, Mixamo, your own rig, a store pack) and the name of the clip.
+        If you can share a .blend, attach it or link it. Please don't attach files you aren't allowed to share.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: For a wrong verdict, say what the clip really does on screen.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Report text
+      description: Paste the "GaitKeeper report" text block from Blender's Text Editor.
+      render: text
+  - type: textarea
+    id: console
+    attributes:
+      label: Error from the system console
+      description: If Blender showed an error, copy the traceback from Window > Toggle System Console (Windows) or the terminal you started Blender from.
+      render: text

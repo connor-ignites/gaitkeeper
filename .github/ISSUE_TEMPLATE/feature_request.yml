@@ -1,0 +1,16 @@
+name: Idea or request
+description: A check GaitKeeper should make, a rig it should read, or something that would make it easier to use.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like it to do?
+      description: If it's a fault GaitKeeper misses, describe how it looks on screen and, if you can, link a clip that shows it.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Where would it help?
+      description: The kind of project or rig (game characters, film, creatures, mocap cleanup).
