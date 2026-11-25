@@ -6,7 +6,7 @@ name = "GaitKeeper"
 tagline = "Checks animation clips for sliding feet, pops and broken joints"
 maintainer = "Connor"
 type = "add-on"
-website = "https://github.com/connorthepollard/gaitkeeper"
+website = "https://github.com/connor-ignites/gaitkeeper"
 tags = ["Animation", "Rigging"]
 
 blender_version_min = "4.2.0"
