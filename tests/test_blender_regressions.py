@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Whole-word names, rear legs, the bend test's clean-up, all-or-nothing Fix and the shared loop rule
+"""Whole-word names, rear legs, the bend test's clean-up, all-or-nothing Fix and Pose Adapt, the clip put back,
+named Pose Adapt numbers and the shared loop rule
 (tests/blender/regressions.py)."""
 
 from pathlib import Path

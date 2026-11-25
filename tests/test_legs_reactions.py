@@ -4,7 +4,7 @@
 import math
 import unittest
 
-from core import legs, reactions
+from core import legs, names, reactions
 
 
 class Legs(unittest.TestCase):
@@ -203,15 +203,15 @@ class Reactions(unittest.TestCase):
         self.assertGreaterEqual(reactions.tell_s(slow, 30), 0.3)
         self.assertIn("ms from its first move to the hit", reactions.reaction_verdicts(reactions.tell_s(fast, 30))[0])
         self.assertEqual(reactions.reaction_verdicts(reactions.tell_s(slow, 30)), [])
-        self.assertTrue(reactions.is_enemy("Kangaroo_Punch (enemy)"))
-        self.assertTrue(reactions.is_enemy("NPC_Sword_Attack"))
-        self.assertFalse(reactions.is_enemy("Sword_Attack"))
+        self.assertTrue(names.is_enemy("Kangaroo_Punch (enemy)"))
+        self.assertTrue(names.is_enemy("NPC_Sword_Attack"))
+        self.assertFalse(names.is_enemy("Sword_Attack"))
 
     def test_upper_strike_names(self):
         for n in ("Kangaroo_Punch", "Kangaroo_ClawSwipe", "Attack_Bite", "Kelpie_JumpAttack", "Bear_Maul"):
-            self.assertTrue(reactions.is_upper_strike(n), n)
+            self.assertTrue(names.is_upper_strike(n), n)
         for n in ("Kangaroo_HitBody", "Scratching", "Wolf_Death", "Hop_Loop", "Attack_Hurt"):
-            self.assertFalse(reactions.is_upper_strike(n), n)
+            self.assertFalse(names.is_upper_strike(n), n)
 
     def test_body_must_drive_the_strike(self):
         self.assertIn(

@@ -38,6 +38,43 @@ class Names(unittest.TestCase):
         self.assertTrue(names.says_loop("IdleLoop2"))
         self.assertFalse(names.says_loop("Walk"))
 
+    def test_strike_and_enemy_words_hidden_inside_other_words_are_not_read(self):
+        # "die" in Soldier and "hit" in White used to stop a punch being judged; "mob" in Mobile made an enemy
+        for strike in ("Soldier_Punch", "White_Bear_Maul", "Wolf_Bite"):
+            with self.subTest(strike):
+                self.assertTrue(names.is_upper_strike(strike))
+        for clip in ("Mobile_Idle", "Bossa_Dance", "Phoenix_Fly"):
+            with self.subTest(clip):
+                self.assertFalse(names.is_enemy(clip))
+        for clip in ("Mob_Attack", "Enemies_Charge", "Bosses_Slam"):
+            with self.subTest(clip):
+                self.assertTrue(names.is_enemy(clip))
+        self.assertFalse(names.says_hops("Brunch_Idle"))
+        self.assertTrue(names.says_hops("Hopping_Loop"))
+
+    def test_bone_words_hidden_inside_other_words_are_not_read(self):
+        # "ring" in Spring skipped its pops; "hand" in Handle and "paw" in Spawn made arms of props
+        for bone in ("Spring", "String_01", "Middleware", "Pinkyring"):
+            with self.subTest(bone):
+                self.assertFalse(names.small_bone(bone))
+        for bone in ("LeftHandRing1", "ring_01_l", "Thumb.L", "LeftToe_End", "Fingers"):
+            with self.subTest(bone):
+                self.assertTrue(names.small_bone(bone))
+        for bone in ("Handle", "Spawn_Point", "Clawhammer", "Wristband"):
+            with self.subTest(bone):
+                self.assertFalse(names.hand_bone(bone))
+        for bone in ("Hand_L", "mixamorig:LeftHand", "FrontPaw.R", "Claws", "wrist.L"):
+            with self.subTest(bone):
+                self.assertTrue(names.hand_bone(bone))
+        self.assertTrue(names.hand_bone("Hand_L", first=True))
+        self.assertFalse(names.hand_bone("LeftHandIndex1", first=True))
+        self.assertTrue(names.shoulder_top("Clavicle_L") and names.shoulder_top("ShoulderBlade.R"))
+        self.assertFalse(names.shoulder_top("Overshoulder"))
+
+    def test_a_word_looked_for_may_be_several_words_in_a_row(self):
+        self.assertTrue(names.has_word("LeftToe_End", ("toe_end",)))
+        self.assertFalse(names.has_word("Toe_Tip_End", ("toe_end",)))
+
 
 class LoopRule(unittest.TestCase):
     def test_a_clip_ending_in_its_first_pose_loops_whatever_its_name(self):

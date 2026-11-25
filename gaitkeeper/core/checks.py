@@ -21,8 +21,6 @@ from .rig import (
     set_action,
 )
 
-SMALL_BONES = ("leaf", "index", "middle", "ring", "pinky", "thumb", "finger", "toe_end", "twist")
-
 TRAVEL_M = 0.3  # hips (or root) this far apart on the first and last frames: the clip travels
 ROOT_STILL_M = 0.05  # a root bone that moves less than this over the clip stays put
 OFF_GROUND_M = 0.15  # feet that never come lower than this never reach the floor (swimming, hanging, flying)
@@ -63,6 +61,11 @@ def clip_loops(arm: bpy.types.Object, act: bpy.types.Action, scene: bpy.types.Sc
     return cycle.loops(name, start, pose_rotations(arm), last - first + 1)
 
 
+def hips_travel(s: Sample) -> bool:
+    """The hips end the clip more than TRAVEL_M from where they began (in the sample's units)."""
+    return "hips" in s.world[0] and motion_math.dist2d(s.world[0]["hips"], s.world[-1]["hips"]) > TRAVEL_M
+
+
 def measure(s: Sample, fps: float, cyclic: bool, arm: bpy.types.Object, name: str = "") -> dict:
     """Every measurement of one sampled clip, in metres: feet, floor, loop seam, pops, root motion, body
     and balance. `verdicts` turns it into plain-English lines."""
@@ -71,7 +74,7 @@ def measure(s: Sample, fps: float, cyclic: bool, arm: bpy.types.Object, name: st
     n = len(s.world)
     out: dict = {"frames": n, "seconds": round((n - 1) / fps, 3), "feet": {}, "name": name, "fps": fps}
     # a clip that travels (root motion) can't wrap its planted feet across the loop seam
-    travels = "hips" in s.world[0] and motion_math.dist2d(s.world[0]["hips"], s.world[-1]["hips"]) > TRAVEL_M
+    travels = hips_travel(s)
     flags_by_side, lowest_sole = _measure_feet(s, fps, cyclic and not travels, out["feet"])
     out["lowest_point_m"] = round(lowest_sole, 4) if lowest_sole < math.inf else None
     if lowest_sole < math.inf and lowest_sole > OFF_GROUND_M:
@@ -144,7 +147,7 @@ def _pops(s: Sample) -> dict[str, list[int]]:
     n = len(s.world_q)
     pop_bones = {}
     for bone in s.world_q[0]:
-        if any(k in bone.lower() for k in SMALL_BONES):
+        if names.small_bone(bone):
             continue
         ang = [motion_math.q_angle_deg(s.world_q[i][bone], s.world_q[i + 1][bone]) for i in range(n - 1)]
         skip = [motion_math.q_angle_deg(s.world_q[i][bone], s.world_q[i + 2][bone]) for i in range(n - 2)]

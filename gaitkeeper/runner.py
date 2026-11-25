@@ -90,23 +90,6 @@ def kept_transforms(
         view_layer.update()
 
 
-@contextmanager
-def kept_action(arm: bpy.types.Object) -> Iterator[None]:
-    """Put the armature's current clip (and its slot, Blender 4.4+) back."""
-    ad = arm.animation_data
-    action = ad.action if ad else None
-    slot = getattr(ad, "action_slot", None) if ad else None
-    try:
-        yield
-    finally:
-        if ad is None:
-            arm.animation_data_clear()
-        else:
-            ad.action = action
-            if slot is not None:
-                ad.action_slot = slot
-
-
 def body_kind(
     arm: bpy.types.Object, legs: dict, scene: bpy.types.Scene, view_layer: bpy.types.ViewLayer
 ) -> tuple[bool, bool]:
@@ -130,7 +113,7 @@ def hops_by_motion(
 ) -> bool | None:
     """Whether a two-legged animal's stepping clips move its feet together (None: no clip tells).
     Plays the clips, then puts the scene back as it was."""
-    with kept_transforms(scene, view_layer), kept_frame(scene), kept_action(arm):
+    with kept_transforms(scene, view_layer), kept_frame(scene), rig.kept_clip(arm):
         return creature.hops(arm, clips_to_check(arm, False), legs, pelvis_bone(arm, legs), scene)
 
 
@@ -245,7 +228,7 @@ def run_check(
     kind, animal = body_setup(arm, scene, view_layer)
     actions = clips_to_check(arm, settings.current_only)
     enemy = settings.attacks_for == "ENEMY"
-    with kept_transforms(scene, view_layer), kept_frame(scene), kept_action(arm):
+    with kept_transforms(scene, view_layer), kept_frame(scene), rig.kept_clip(arm):
         if kind == "person":
             rig_lines, clips = check_person(arm, actions, enemy, scene, view_layer, progress)
         elif animal is None:

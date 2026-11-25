@@ -16,7 +16,7 @@ import bpy
 from . import adapt_math, body_rules, reactions
 from . import legs as leg_checks
 from .checks import clip_loops, scene_fps
-from .names import has_word
+from .names import hand_bone, has_word, is_enemy, is_upper_strike, shoulder_top
 from .rig import body_axes, clip_label, clip_range, metres_world, rest_space, set_action
 
 SKIP = (
@@ -41,7 +41,6 @@ SKIP = (
     "fix",
     "helper",
 )
-TOPS_OFF = ("clavicle", "shoulder", "scapula", "collar")
 STRIKE_MIN_SPEED = 2.0  # m/s: a striking hand, head or foot peaks at least this fast
 UPPER_MIN_REL_SPEED = 0.5  # m/s against the hips: below this no part above the legs is striking
 
@@ -74,14 +73,14 @@ def find_legs(arm: bpy.types.Object) -> dict[str, list[str]]:
             chain.append(b)
             b = b.parent
         chain.reverse()
-        while chain and any(k in chain[0].name.lower() for k in TOPS_OFF) and len(chain) > 3:
+        while chain and shoulder_top(chain[0].name) and len(chain) > 3:
             chain = chain[1:]
         if len(chain) >= 2:
             chains.append(chain)
     if not chains:
         return {}
     # sides by x, fore and hind by y (front = the end the head is on)
-    head = next((b for b in arm.data.bones if "head" in b.name.lower()), None)
+    head = next((b for b in arm.data.bones if has_word(b.name, ("head",))), None)
     tops_y = [(mw @ c[0].head_local).y for c in chains]
     mid_y = sum(tops_y) / len(tops_y)
     head_y = (mw @ head.head_local).y if head else mid_y - 1
@@ -178,12 +177,12 @@ def measure_clip(
     if cyclic and has_word(name, ("idle",)) and tracks.head_z and not resting:
         k = len(tracks.pelvis) - 1 if len(tracks.pelvis) > 2 else len(tracks.pelvis)  # the last frame repeats
         v = v + reactions.block_verdicts([q[2] for q in tracks.pelvis[:k]], {"head": tracks.head_z[:k]}, fps)
-    enemy = enemy or reactions.is_enemy(name)
+    enemy = enemy or is_enemy(name)
     if strike or has_word(name, LEG_STRIKE):
         sm, sv = measure_strike(arm, act, animal.legs, tracks.per_leg, fps, animal.hopper, scene, enemy)
         m["strike"] = sm
         v = v + sv
-    elif reactions.is_upper_strike(name):
+    elif is_upper_strike(name):
         um, uv = measure_upper_strike(arm, act, animal.legs, animal.pelvis, fps, scene, enemy)
         if um:
             m["upper_strike"] = um
@@ -227,9 +226,6 @@ def _linear_runs(tracks: ClipTracks, fps: float) -> dict[str, tuple[int, int]]:
     return runs
 
 
-HAND_WORDS = ("hand", "paw", "claw", "wrist")
-
-
 def find_upper(arm: bpy.types.Object, legs: dict[str, list[str]]) -> dict[str, list[str]]:
     """The parts an animal strikes with above the legs: each arm (chest, shoulder, elbow, hand) and the
     head (two bones behind it, then the head). Arms are chains ending in a hand, paw or claw that isn't
@@ -237,10 +233,9 @@ def find_upper(arm: bpy.types.Object, legs: dict[str, list[str]]) -> dict[str, l
     in_legs = {n for c in legs.values() for n in c}
     out: dict[str, list[str]] = {}
     for b in arm.data.bones:
-        low = b.name.lower()
-        if b.name in in_legs or has_word(b.name, SKIP) or not any(k in low for k in HAND_WORDS):
+        if b.name in in_legs or has_word(b.name, SKIP) or not hand_bone(b.name):
             continue
-        if any(c.name.lower().startswith(HAND_WORDS) for c in b.children):
+        if any(hand_bone(c.name, first=True) for c in b.children):
             continue  # a wrist with a hand below it: the hand is the end
         chain, p = [b.name], b.parent
         while p is not None and len(chain) < 5:

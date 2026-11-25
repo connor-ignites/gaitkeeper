@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import body_rules, motion_math, reactions
-from .names import has_word, words_of
+from .names import has_word, is_enemy, words_of
 
 RUNNING = ("run", "sprint", "jog", "dash")
 GAIT = ("walk", "run", "jog", "sprint")
@@ -827,7 +827,7 @@ def _strike_issues(st: dict, name: str, fps: float) -> list[Issue]:
     """An enemy's tell, a wind-up that outruns the hit, the hit's lead-in and length, and the body behind it."""
     out: list[Issue] = []
     nice = _strike_label(st["effector"])
-    if reactions.is_enemy(name):  # an enemy's attack must give the player time to react
+    if is_enemy(name):  # an enemy's attack must give the player time to react
         for v in reactions.reaction_verdicts(st.get("tell_s"), nice):
             out.append(("tell", st.get("tell_s") or 0.0, v))
     # the fastest move was a draw-back going the other way, faster than the hit (as for animals, 0.8)

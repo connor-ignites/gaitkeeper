@@ -6,7 +6,9 @@
 - clip names are read by whole words: a skating "Soldier_Walk" or "Troll_Run" is still judged as a walk or run;
 - bone names too: hind legs named RearLeg_L ("ear" inside) are found;
 - the bend test puts rotation modes, pose and clip back even when it fails midway;
-- Fix is all or nothing: failing midway leaves no new action and the original clip current;
+- Fix and Pose Adapt are all or nothing: failing midway leaves no new action and the original clip current;
+- one helper (rig.kept_clip) puts the clip and its slot back;
+- Pose Adapt's thresholds are named, and its travel test is the checks' own (TRAVEL_M);
 - one loop rule for people and animals: a clip ending in its first pose loops, one ending elsewhere doesn't.
 Prints one "REGRESSION ..." line per step and exits 1 on the first failure.
 """
@@ -21,6 +23,7 @@ from pathlib import Path
 import bpy
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import adapt_pin
 import demo_rig
 
 PACKAGE = "bl_ext.user_default.gaitkeeper"
@@ -153,6 +156,54 @@ def animal_fix_is_all_or_nothing() -> None:
     fix_leaves_no_trace("animal", arm, act, undo)
 
 
+def adapt_is_all_or_nothing() -> None:
+    """Pose Adapt failing after it has written its copy (judging the copy fails): nothing may be left behind."""
+    fresh_scene()
+    arm = demo_rig.build_rig()
+    walk = adapt_pin.key_walk(arm)
+    bpy.context.view_layer.objects.active = arm
+    adapt_pin.reset(arm, walk, adapt_pin.EDIT_FRAME)
+    adapt_pin.pose(arm, "Spine1", 10)
+    before = set(bpy.data.actions)
+    undo = failing(module("core.adapt"), "_judge_person")
+    try:
+        failed = raises(bpy.ops.gaitkeeper.adapt)  # an operator's ERROR report raises in a script
+    finally:
+        undo()
+    step("adapt: failed", failed)
+    step("adapt: no new action", set(bpy.data.actions) == before, str([a.name for a in bpy.data.actions]))
+    step("adapt: original current", arm.animation_data.action == walk, str(arm.animation_data.action))
+
+
+def fails_after_swap(arm: bpy.types.Object, other: bpy.types.Action) -> bool:
+    """Inside rig.kept_clip, make `other` current and fail."""
+    rig = module("core.rig")
+
+    def swap() -> None:
+        with rig.kept_clip(arm):
+            rig.set_action(arm, other)
+            raise RuntimeError("forced failure")
+
+    return raises(swap)
+
+
+def clip_is_put_back() -> None:
+    """rig.kept_clip (behind Check, the bend test and the all-or-nothing guard) puts the clip and its slot back
+    after an error, and leaves an armature that had no animation data without any."""
+    fresh_scene()
+    arm = demo_rig.build_rig()
+    walk = glide(arm, "Walk_Glide")
+    other = demo_rig.new_clip(arm, "Other", 10)
+    module("core.rig").set_action(arm, walk)
+    slot = getattr(arm.animation_data, "action_slot", None)
+    step("kept clip: failed", fails_after_swap(arm, other))
+    step("kept clip: clip back", arm.animation_data.action == walk, str(arm.animation_data.action))
+    step("kept clip: slot back", getattr(arm.animation_data, "action_slot", None) == slot)
+    bare = demo_rig.build_bird()
+    bare.animation_data_clear()
+    step("kept clip: none made", fails_after_swap(bare, other) and bare.animation_data is None)
+
+
 def one_loop_rule() -> None:
     fresh_scene()
     checks = module("core.checks")
@@ -181,5 +232,7 @@ if __name__ == "__main__":
     bend_test_puts_everything_back()
     person_fix_is_all_or_nothing()
     animal_fix_is_all_or_nothing()
+    adapt_is_all_or_nothing()
+    clip_is_put_back()
     one_loop_rule()
     print("REGRESSION PASSED")

@@ -25,9 +25,10 @@ import bpy
 from mathutils import Matrix, Quaternion, Vector
 
 from . import adapt_math, motion_math
-from .checks import measure, verdicts
+from .checks import hips_travel, measure, verdicts
 from .edit import write_action
 from .fix import smooth_pops, two_bone_ik
+from .fix_guard import all_or_nothing
 from .names import says_loop
 from .rig import (
     Sample,
@@ -51,6 +52,10 @@ Gate = Callable[[str, int, str | None, bool], list[float] | None]
 LEG_ROLES = ("thigh", "calf", "foot", "toe")
 CLEAR = 0.08  # m: a touched swinging ankle keeps at least this much (or its old height) above its floor
 CLEAR_BALL = 0.05  # m: and the ball of the foot this much, so the toes don't brush the ground mid-swing
+SPREAD_FRAMES = 6  # frames a change takes to fade in and out, unless asked otherwise
+FOOT_AT_GOAL_M = 5e-4  # a foot this close to its goal...
+FOOT_AT_GOAL_DEG = 0.1  # ...and turned this little from it is left as it is (no IK, no new keys)
+CHANGED_LISTED = 12  # the report names at most this many changed bones, then "..."
 
 
 def capture_pose(arm: bpy.types.Object) -> Pose:
@@ -180,7 +185,7 @@ def adapt_clip(
     scene: bpy.types.Scene,
     view_layer: bpy.types.ViewLayer,
     mode: str = "whole",
-    spread: float = 6,
+    spread: float = SPREAD_FRAMES,
     mirror: bool = True,
     keep_feet: bool = True,
     name: str | None = None,
@@ -192,36 +197,39 @@ def adapt_clip(
     poses `more` ((frame, pose) pairs; the one on screen wins on its own frame). Returns (copy, report).
     The clip is played on `scene`; bone edits are evaluated through `view_layer`.
     `judge(action) -> verdict lines` checks an animal (roles from creature.leg_roles); None: a person,
-    judged by the person checks."""
-    a, poses = _poses_in_clip(act, mode, frame, edited, more)
-    before = sample(arm, act, roles, scene)
-    keys = _edit_keys(poses, before, a)
-    if cyclic is None:
-        cyclic = says_loop(act.name)
-    report = _start_report(arm, act, before, keys, a, fps, cyclic, judge)
-    travels = _travels(report, before, judge)
-    sp = _choose_spread(arm, roles, before, fps, cyclic, mode, spread, mirror, report["notes"])
-    report["period"] = sp.period
-    side_of = _bone_sides(roles)
-    gate = partial(_gate, _contacts(before, roles, fps, sp), side_of, cyclic)
-    track, mirrored_any = _track(arm, roles, keys, sp, gate, side_of)
-    _note_spread(report, sp, spread, keys, track, mirrored_any)
-    frames = _blend_frames(before, sp, track)
+    judged by the person checks. All or nothing: if anything fails midway, the half-written copy is
+    removed and the clip that was current is made current again before the error is raised."""
+    with all_or_nothing(arm):
+        a, poses = _poses_in_clip(act, mode, frame, edited, more)
+        before = sample(arm, act, roles, scene)
+        keys = _edit_keys(poses, before, a)
+        if cyclic is None:
+            cyclic = says_loop(act.name)
+        report = _start_report(arm, act, before, keys, a, fps, cyclic, judge)
+        travels = _travels(report, before, judge)
+        sp = _choose_spread(arm, roles, before, fps, cyclic, mode, spread, mirror, report["notes"])
+        report["period"] = sp.period
+        side_of = _bone_sides(roles)
+        gate = partial(_gate, _contacts(before, roles, fps, sp), side_of, cyclic)
+        track, mirrored_any = _track(arm, roles, keys, sp, gate, side_of)
+        _note_spread(report, sp, spread, keys, track, mirrored_any)
+        frames = _blend_frames(before, sp, track)
 
-    touched = set(track)  # the bones the animator changed, directly or through the mirror
-    legs = _legs(roles, touched)
-    orig_feet = _foot_matrices(arm, scene, legs, roles, a, sp.n) if keep_feet else {}
-    new = write_action(arm, frames, name or f"{act.name.split('|')[-1]}_adapted")
-    if keep_feet and legs:
-        _keep_feet(arm, scene, view_layer, legs, orig_feet, before, roles, sp.n, fps, cyclic and not travels, touched)
-        report["notes"] += _feet_notes(legs, leg_sides(roles))
-    if judge is None:
-        _judge_person(report, arm, act, new, roles, fps, cyclic, sp.n, scene)
-    else:
-        _judge_animal(report, act, new, judge)
-    report["pose_kept_deg"] = _pose_kept_deg(arm, scene, new, keys)
-    new.use_fake_user = True
-    return new, report
+        touched = set(track)  # the bones the animator changed, directly or through the mirror
+        legs = _legs(roles, touched)
+        orig_feet = _foot_matrices(arm, scene, legs, roles, a, sp.n) if keep_feet else {}
+        new = write_action(arm, frames, name or f"{act.name.split('|')[-1]}_adapted")
+        if keep_feet and legs:
+            loop_feet = cyclic and not travels
+            _keep_feet(arm, scene, view_layer, legs, orig_feet, before, roles, sp.n, fps, loop_feet, touched)
+            report["notes"] += _feet_notes(legs, leg_sides(roles))
+        if judge is None:
+            _judge_person(report, arm, act, new, roles, fps, cyclic, sp.n, scene)
+        else:
+            _judge_animal(report, act, new, judge)
+        report["pose_kept_deg"] = _pose_kept_deg(arm, scene, new, keys)
+        new.use_fake_user = True
+        return new, report
 
 
 def _poses_in_clip(
@@ -275,7 +283,7 @@ def _travels(report: dict, before: Sample, judge: Callable | None) -> bool:
     """Whether the clip moves the body along (then a loop's feet don't wrap round the seam)."""
     if judge is None:
         return report["original"].get("travels", False)
-    return "hips" in before.world[0] and motion_math.dist2d(before.world[0]["hips"], before.world[-1]["hips"]) > 0.3
+    return hips_travel(before)
 
 
 def _step_pattern(
@@ -708,7 +716,7 @@ def _place_legs(ft: _Feet, goal: dict[str, list[tuple[Vector, Matrix]]], lift: d
                 target = target + Vector((0, 0, lift[foot][f]))
             off = (fb.head - target).length
             turn = motion_math.q_angle_deg(tuple(fb.matrix.to_quaternion()), tuple(rot.to_quaternion()))
-            if off < 5e-4 and turn < 0.1:
+            if off < FOOT_AT_GOAL_M and turn < FOOT_AT_GOAL_DEG:
                 continue
             two_bone_ik(ft.arm, pb[thigh], pb[calf], fb, target, rot, ft.view_layer)
             for bone in (pb[thigh], pb[calf], fb):
@@ -734,10 +742,11 @@ def _keep_pitch(now: Matrix, was: Matrix) -> Matrix:
 def report_lines(new_name: str, rep: dict) -> list[str]:
     """The report's text lines for a finished Pose Adapt."""
     many = "," in str(rep["frame"])
+    more = " ..." if len(rep["changed"]) > CHANGED_LISTED else ""
     lines = [
         f"Pose Adapt: made {new_name} from your pose{'s' if many else ''} on frame{'s' if many else ''} {rep['frame']}",
         "",
-        f"  changed: {', '.join(rep['changed'][:12])}{' ...' if len(rep['changed']) > 12 else ''}",
+        f"  changed: {', '.join(rep['changed'][:CHANGED_LISTED])}{more}",
         f"  spread over: {rep['how']}",
     ]
     lines += [f"  note: {x}" for x in rep["notes"]]

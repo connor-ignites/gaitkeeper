@@ -6,7 +6,9 @@ from __future__ import annotations
 import copy
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from typing import NamedTuple
 
 import bpy
 from mathutils import Euler, Matrix, Quaternion, Vector
@@ -159,6 +161,43 @@ def set_action(arm: bpy.types.Object, act: bpy.types.Action) -> None:
     slots = getattr(act, "slots", None)
     if slots is not None and getattr(ad, "action_slot", None) is None and len(slots):
         ad.action_slot = slots[0]
+
+
+class SavedClip(NamedTuple):
+    """The armature's current clip and its slot (Blender 4.4+), and whether it had animation data at all."""
+
+    had_data: bool
+    action: bpy.types.Action | None
+    slot: object | None
+
+
+def save_clip(arm: bpy.types.Object) -> SavedClip:
+    ad = arm.animation_data
+    if ad is None:
+        return SavedClip(False, None, None)
+    return SavedClip(True, ad.action, getattr(ad, "action_slot", None))
+
+
+def restore_clip(arm: bpy.types.Object, saved: SavedClip) -> None:
+    """Make the saved clip (and its slot) the armature's current one again. An armature that had no
+    animation data loses any made since."""
+    if not saved.had_data:
+        arm.animation_data_clear()
+        return
+    ad = arm.animation_data or arm.animation_data_create()
+    ad.action = saved.action
+    if saved.slot is not None:
+        ad.action_slot = saved.slot
+
+
+@contextmanager
+def kept_clip(arm: bpy.types.Object) -> Iterator[None]:
+    """Put the armature's current clip (and its slot) back afterwards, even if what runs inside fails."""
+    saved = save_clip(arm)
+    try:
+        yield
+    finally:
+        restore_clip(arm, saved)
 
 
 ROTATION_PATHS = {"QUATERNION": "rotation_quaternion", "AXIS_ANGLE": "rotation_axis_angle"}

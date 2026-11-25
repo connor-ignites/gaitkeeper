@@ -132,12 +132,11 @@ the original clip is not changed"""
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         arm, scene = context.object, context.scene
-        act, frame = arm.animation_data.action, scene.frame_current
+        frame = scene.frame_current
         try:
             new, rep = adapt_current(arm, scene, context.view_layer)
         except Exception as e:  # reported in the UI; the traceback goes to the system console
-            traceback.print_exc()
-            rig.set_action(arm, act)
+            traceback.print_exc()  # adapt_clip has already removed any half-made copy and put the clip back
             scene.frame_set(frame)
             self.report(*self.failure_message(e, scene))
             return {"CANCELLED"}

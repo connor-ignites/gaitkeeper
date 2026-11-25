@@ -153,14 +153,7 @@ STOP_MIN = 0.2  # the frame after the fastest one keeps at least this share of t
 STUTTER = 0.6  # mid-strike, the effector may not drop below 60% of its speed so far and then speed up again
 
 
-ENEMY_WORDS = ("enemy", "npc", "boss", "mob", "foe")
 REACT_S = 0.3  # a player needs about this long to react to a simple thing they see (Ghost of Tsushima, GDC)
-
-
-def is_enemy(name: str) -> bool:
-    """A clip for an enemy (its name says so, or the add-on's "Clips are for: Enemies")."""
-    low = name.lower()
-    return any(w in low for w in ENEMY_WORDS)
 
 
 def tell_s(
@@ -638,17 +631,9 @@ def lean_verdicts(m: dict, turning: bool) -> list[str]:
 # then it pulls back with its weight). Calibrated on a commercial dog pack's bites (good) and a
 # kangaroo and kelpie with known faults.
 
-UPPER_STRIKE = ("punch", "jab", "swipe", "claw", "slash", "maul", "box", "bite", "attack", "headbutt", "snap")
-NOT_A_STRIKE = ("hit", "scratch", "react", "death", "die", "dead", "hurt", "stagger")
 CHAIN_LEAD_FRAMES = 2  # the striking point may peak at most this many frames before the body behind it
 JAW_OPEN_MIN = 8.0  # degrees: a bite opens its mouth at least this far on the way in
 JAW_LATE_S = 0.15  # the widest gape may come at most this long after the hit starts
-
-
-def is_upper_strike(name: str) -> bool:
-    """A clip named as a strike with the arms, claws or jaws (not a hit reaction or a scratch)."""
-    low = name.lower()
-    return any(w in low for w in UPPER_STRIKE) and not any(w in low for w in NOT_A_STRIKE)
 
 
 def chain_verdicts(peaks: Sequence[int], name: str = "the strike") -> list[str]:

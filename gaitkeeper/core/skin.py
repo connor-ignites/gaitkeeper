@@ -21,7 +21,7 @@ import bpy
 from mathutils import Quaternion, Vector
 
 from .names import has_word
-from .rig import TRANSFORMS, body_axes
+from .rig import TRANSFORMS, body_axes, restore_clip, save_clip
 
 CONTROL_WORDS = ("ik", "pole", "target", "ctrl", "control", "mch", "helper")
 MAX_INFLUENCES = 4
@@ -126,9 +126,7 @@ def kept_pose(arm: bpy.types.Object) -> Iterator[None]:
     """Put the armature's clip (and its slot, Blender 4.4+) and every pose bone's rotation mode and
     transform back afterwards, even if what runs inside fails. A bone's rotation mode is shared by every
     clip (FBX bones are often Euler), so a changed mode would change how every clip plays."""
-    ad = arm.animation_data
-    action = ad.action if ad else None
-    slot = getattr(ad, "action_slot", None) if ad else None
+    clip = save_clip(arm)
     modes = {pb.name: pb.rotation_mode for pb in arm.pose.bones}
     values = {pb.name: [tuple(getattr(pb, t)) for t in TRANSFORMS] for pb in arm.pose.bones}
     try:
@@ -138,10 +136,7 @@ def kept_pose(arm: bpy.types.Object) -> Iterator[None]:
             pb.rotation_mode = modes[pb.name]  # first: changing the mode converts the rotation values
             for t, value in zip(TRANSFORMS, values[pb.name]):
                 setattr(pb, t, value)
-        if ad is not None:
-            ad.action = action
-            if slot is not None:
-                ad.action_slot = slot
+        restore_clip(arm, clip)
 
 
 def bend_test(arm: bpy.types.Object, roles: dict[str, str], meshes: list, view_layer: bpy.types.ViewLayer) -> dict:

@@ -19,6 +19,7 @@ import itertools
 from collections.abc import Sequence
 
 from . import body_rules, reactions
+from .names import has_word, says_hops
 
 BOW_WARN = {"hind": 0.06, "fore": 0.18}  # share of the leg; a good dog pack bows hind 1-2%, fore 10-13%
 BOW_WARN_DEFAULT = 0.08  # for a leg that is neither hind nor fore
@@ -173,9 +174,8 @@ def verdicts(m: dict, name: str, hopper: bool) -> list[str]:
                 f"WARN {end} feet land {r:.1f} times as wide apart as the {'hips' if end == 'hind' else 'shoulders'}: "
                 "they straddle. Feet go under the body."
             )
-    words = name.lower()
     # the hop rules are for hoppers (kangaroos, wallabies, rabbits): a dog's jump is a different move
-    if hopper and any(w in words for w in ("hop", "run", "bound")) and m.get("air_share", 0) > 0:
+    if hopper and says_hops(name) and m.get("air_share", 0) > 0:
         down = max((v["down_share"] for k, v in m["legs"].items() if k.startswith("hind")), default=0)
         rate = 1 / m["cycle_s"] if m.get("cycle_s") else 0
         if m.get("landing_sink_share", 1) < SPRING_MIN:
@@ -188,7 +188,7 @@ def verdicts(m: dict, name: str, hopper: bool) -> list[str]:
                 f"WARN the feet are down {down:.0%} of each hop: it sits on the ground. A hop touches down briefly "
                 "(about 40% of the cycle at a slow hop, under a third at speed) and spends the rest in the air."
             )
-        if rate and not HOP_RATE[0] <= rate <= HOP_RATE[1] and "kick" not in words:
+        if rate and not HOP_RATE[0] <= rate <= HOP_RATE[1] and not has_word(name, ("kick",)):
             msgs.append(
                 f"WARN {rate:.1f} hops a second: kangaroos hop about 1.3 to 1.5 times a second at a slow "
                 "hop and 2 to 2.3 at speed (they go faster mostly with longer hops). Make the cycle 0.45-0.75 s."
