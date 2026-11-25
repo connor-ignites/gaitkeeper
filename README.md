@@ -1,5 +1,9 @@
 # GaitKeeper
 
+[![CI](https://github.com/connor-ignites/gaitkeeper/actions/workflows/ci.yml/badge.svg)](https://github.com/connor-ignites/gaitkeeper/actions/workflows/ci.yml)
+[![Licence: GPL-3.0-or-later](https://img.shields.io/badge/licence-GPL--3.0--or--later-blue)](LICENSE)
+[![Blender 4.2+](https://img.shields.io/badge/Blender-4.2%2B-orange?logo=blender&logoColor=white)](https://www.blender.org/download/)
+
 A free Blender add-on that checks your animation clips for the faults players notice: feet that slide or sink, knees that bend the wrong way, loops that hitch, one-frame pops. Each clip gets PASS, WARN or FAIL with a plain-English reason.
 
 **Beta.** Check only reads your clips. Fix and Pose Adapt write a new copy of a clip and never change the original, and both can be undone. Still, save your work (or use version control) before trying any new tool on a project you care about.
@@ -31,7 +35,7 @@ Checking changes nothing in your scene. The clip and frame you were on are put b
 
 ## Install
 
-1. Download `gaitkeeper-0.9.0.zip` from the [Releases](../../releases) page.
+1. Download `gaitkeeper-0.9.0.zip` from the [Releases](https://github.com/connor-ignites/gaitkeeper/releases) page.
 2. In Blender 4.2 or newer: **Edit > Preferences > Get Extensions**, open the arrow menu at the top right, choose **Install from Disk**, and pick the zip. (Dragging the zip onto Blender works too.)
 
 ## A first check, in about a minute
@@ -93,7 +97,9 @@ Before this release, Check ran on every clip of each rig below, and Fix on up to
 | Quaternius UAL 2, root-motion version | 42 | person | 19 pass, 23 warn, 0 fail |
 | A commercial Border Collie pack | 112 | animal | 110 pass, 2 warn, 0 fail |
 | A hand-rigged kangaroo | 4 | hopper | 4 warn |
+| A code-built emu (two legs and a tail, walks) | 11 | animal | 10 pass, 1 warn |
 | A huntsman spider (eight legs) | 7 | animal | 5 pass, 2 warn |
+| A commercial humanoid pack exported from Unity, with a held root bone (2 clips sampled) | 2 | person | 2 warn |
 
 The tests also run on small rigs built in code, including the odd cases: empty and one-frame clips, NLA-only animation, shape-key clips, scaled and rotated rigs, Japanese bone names, linked rigs with a library override, and an armature with no bones.
 
@@ -101,48 +107,29 @@ Clip names matter. GaitKeeper reads words like `walk`, `run`, `loop`, `punch` an
 
 ## Known limits
 
-- It finds bones by name (Mixamo-style, Unreal-style, `.L`/`.R` and similar). An unusual naming scheme may need the Body setting set by hand, and a rig with a bone named "tail" is treated as an animal on Auto. A two-legged bird with a tail bone reads as a hopper; set Hopper to No.
-- Rigs that keep a fixed rotation and a 100x scale on a root bone above the hips (some commercial packs exported from Unity) are misread: knees show as bent backwards and the legs as swapped. The report says the reading is past anything a body can do and may be the tool's mistake, and Fix refuses these clips. Proper support is planned.
+- It finds bones by name (Mixamo-style, Unreal-style, `.L`/`.R` and similar). An unusual naming scheme may need the Body setting set by hand, and a rig with a bone named "tail" is treated as an animal on Auto.
+- On Auto, a two-legged animal with a tail counts as a hopper only when its feet move together in its walk, run or hop clips. A rig with no clips named like that falls back to the skeleton and may need the Hopper setting.
 - Check clips takes every action in the file that keys this armature's bones. Two characters with the same bone names in one file will pick up each other's clips; tick **Current clip only** there.
 - Feet are judged against a flat floor. A clip authored on a slope or on stairs will read as sinking or floating.
-- Each clip is played frame by frame through Blender, so a heavy scene with high-poly meshes is slow to check. On a light rig, Check and Fix together take about 11 seconds for a 1000-frame clip.
+- Each clip is played frame by frame through Blender, so a heavy scene with high-poly meshes is slow to check. On a light rig, Check and Fix together take about 11 seconds for a 1000-frame clip; the progress bar and status bar show which clip it's on.
 - Fix refuses rather than guesses: on a rig whose bones it can't name, on a clip with no keys on the rig, or when its result checks worse than the original. A refusal leaves nothing behind.
 - The thresholds come from motion-capture data and real footage of people, dogs and kangaroos. They suit realistic and semi-realistic motion. Cartoon timing and squash will get more WARNs, because exaggerated motion breaks the same rules a broken clip does.
 - Fix handles feet, seams, pops and root motion. It won't repair a bad pose or bad timing; it tells you where they are.
 
 ## Building and testing
 
-You need Python 3.11+ and, for the build and the smoke test, Blender 4.2+ (set `BLENDER` to its executable if it isn't on your PATH).
-
 ```sh
 python -m pip install ruff pytest
 ruff check . && ruff format --check .
-pytest                          # the maths runs without Blender; the smoke test skips if Blender isn't found
-python scripts/build.py         # builds and validates dist/gaitkeeper-<version>.zip
+BLENDER=/path/to/blender pytest     # without BLENDER (or blender on PATH) only the maths tests run
+python scripts/build.py             # builds and validates dist/gaitkeeper-<version>.zip
 ```
 
-The smoke test builds the zip, installs it into a temporary Blender profile (yours isn't touched), builds a small rig in code, runs Check and Fix, and reads the report back.
-
-## Layout
-
-```text
-gaitkeeper/            the extension (what goes in the zip)
-  __init__.py          registration
-  props.py             panel settings (scene.gaitkeeper)
-  operators.py         Check, Fix, Show clip
-  adapt_ops.py         Pose Adapt
-  panel.py             the sidebar tab
-  runner.py            picks person or animal, runs the checks, restores the scene
-  core/                the checks; the maths modules run without Blender
-tests/                 pytest, plus tests/blender/ for the headless smoke test
-scripts/build.py       extension build and validation
-```
+The Blender tests build the zip, install it into a temporary Blender profile (yours isn't touched) and run on rigs built in code: install and smoke test, the safety checks, the odd cases above, held-root and hopper rigs, progress reporting, and a pinned Pose Adapt result. CI runs all of them on Blender 4.2 LTS and 5.2 LTS.
 
 ## Contributing
 
-Bug reports are most useful with the rig: a .blend (or a link to a free model) and the name of the clip that reads wrong. If a check is wrong on a clip that looks fine, say what you expected to see.
-
-Pull requests are welcome. Keep `ruff check`, `ruff format --check` and `pytest` passing, add a test for any change to the maths, and keep the messages in plain English: `tests/test_messages.py` checks them.
+Bug reports with the rig attached help the most. See [CONTRIBUTING.md](CONTRIBUTING.md) for the setup, how the code is laid out and the rules for changes.
 
 ## Licence
 
