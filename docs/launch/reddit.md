@@ -13,7 +13,7 @@ The live rule pages couldn't be read from here: Reddit blocks automated reading.
 - Reddit as a whole frowns on posting the same thing to many subs at once. Space the posts a few days apart, and answer comments.
 - AI: no rule about AI-assisted tools was found, but a disclosure line is included below anyway, because people ask.
 
-Timing is general guidance from social media scheduling blogs, not from the subs: a weekday morning, US Eastern time, Tuesday to Thursday, about 7 to 10 am. That's roughly 9 pm to midnight in Brisbane.
+Timing is general guidance from social media scheduling blogs, not from the subs: a weekday morning, US Eastern time, Tuesday to Thursday, about 7 to 10 am.
 
 Media: upload the before/after clip as a Reddit video (MP4, no sound needed) rather than linking a GIF. Use `docs/media/hero-walk-pops-and-skating.gif`'s source clip, or the punch and kangaroo clips as extra posts later.
 

@@ -19,7 +19,7 @@ It works on people (two legs, two arms, any common bone naming) and on animals (
 | Check | What it means |
 | --- | --- |
 | Skating | A foot that should be planted slides along the floor. |
-| Sinking and floating | A planted foot goes through the floor, or hovers above it. |
+| Sinking | A planted foot goes through the floor. |
 | Backward and sideways joints | A knee or elbow bends past what a body can do, or off its hinge. |
 | Pops | A bone snaps to a new angle in one frame instead of turning over a few. |
 | Loop seam | The last frame of a loop doesn't meet the first, so it hitches every cycle. |
@@ -29,7 +29,7 @@ It works on people (two legs, two arms, any common bone naming) and on animals (
 | Attacks with no wind-up | A punch, kick or bite that starts at full speed with no coil, or stops dead at the hit. |
 | Enemy tells | With "Attacks are for: Enemies", every attack must give the player about 300 ms to react. |
 | Animal legs | Legs that bow out sideways, feet set too wide in the rest pose, hops that hang wrong. |
-| Skin | Mesh that collapses or stretches badly when a joint bends (people, when a skinned mesh is found). |
+| Skin | Mesh that collapses when a joint bends (people, when a skinned mesh is found). |
 
 Checking changes nothing in your scene. The clip and frame you were on are put back afterwards.
 
@@ -113,7 +113,7 @@ Clip names matter. GaitKeeper reads words like `walk`, `run`, `loop`, `punch` an
 - Feet are judged against a flat floor. A clip authored on a slope or on stairs will read as sinking or floating.
 - Each clip is played frame by frame through Blender, so a heavy scene with high-poly meshes is slow to check. On a light rig, Check and Fix together take about 11 seconds for a 1000-frame clip; the progress bar and status bar show which clip it's on.
 - Fix refuses rather than guesses: on a rig whose bones it can't name, on a clip with no keys on the rig, or when its result checks worse than the original. A refusal leaves nothing behind.
-- The thresholds come from motion-capture data and real footage of people, dogs and kangaroos. They suit realistic and semi-realistic motion. Cartoon timing and squash will get more WARNs, because exaggerated motion breaks the same rules a broken clip does.
+- The thresholds come from clean clips (the Quaternius libraries and a commercial dog pack), published gait studies and slowed-down footage of people, dogs, kangaroos and spiders. They suit realistic and semi-realistic motion. Cartoon timing and squash will get more WARNs, because exaggerated motion breaks the same rules a broken clip does.
 - Fix handles feet, seams, pops and root motion. It won't repair a bad pose or bad timing; it tells you where they are.
 
 ## Building and testing
