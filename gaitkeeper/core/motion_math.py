@@ -48,64 +48,11 @@ def q_angle_deg(a: Sequence[float], b: Sequence[float]) -> float:
     return math.degrees(2 * math.acos(d))
 
 
-def q_mean(qs: Sequence[Sequence[float]]) -> Quat:
-    """Average of nearby rotations (normalised sum after hemisphere alignment). Good for clip means."""
-    ref = qs[0]
-    acc = [0.0, 0.0, 0.0, 0.0]
-    for q in qs:
-        for i, c in enumerate(q_align(q, ref)):
-            acc[i] += c
-    return q_norm(acc)
-
-
-def q_scale_from(q: Sequence[float], mean: Sequence[float], factor: float) -> Quat:
-    """Move q away from (factor > 1) or toward (factor < 1) the mean. factor 0 freezes at the mean.
-    Extrapolates by slerp with t = factor, which stays stable up to about 2x for real motion."""
-    return q_slerp(mean, q, factor)
-
-
-# ---------- time ----------
-
-
-def resample_times(n_frames: int, factor: float) -> list[float]:
-    """Source times (in frames) for a clip played `factor` times slower (2.0 = twice as long).
-    The last source frame is always included so a loop stays a loop."""
-    last = n_frames - 1
-    out_len = max(2, round(last * factor) + 1)
-    return [last * i / (out_len - 1) for i in range(out_len)]
-
-
-def timewarp(rates: Sequence[float]) -> list[float]:
-    """Per-frame playback rates (1 = normal, 1.5 = this part passes faster) -> source times for an
-    output clip of the same length. Rates are normalised so the clip keeps its length and loops."""
-    n = len(rates)
-    if n < 2:
-        return [0.0] * n
-    seg = [max(0.05, (rates[i] + rates[i + 1]) / 2) for i in range(n - 1)]
-    # time spent in each source segment is 1/rate; output frames are spread evenly over that time
-    spent = [1.0 / r for r in seg]
-    total = sum(spent)
-    cum = [0.0]
-    for s in spent:
-        cum.append(cum[-1] + s)
-    out = []
-    j = 0
-    for i in range(n):
-        target = total * i / (n - 1)
-        while j < n - 2 and cum[j + 1] < target:
-            j += 1
-        span = cum[j + 1] - cum[j]
-        frac = 0.0 if span == 0 else (target - cum[j]) / span
-        out.append(j + min(1.0, max(0.0, frac)))
-    out[-1] = float(n - 1)
-    return out
-
-
 # ---------- signals ----------
 
 
 def smooth_weights(flags: Sequence[float], radius: int, cyclic: bool) -> list[float]:
-    """Box-blur a 0..1 signal (e.g. 'injured foot on the ground') so edits fade in and out."""
+    """Box-blur a 0..1 signal (e.g. "foot on the ground") so edits fade in and out."""
     n = len(flags)
     out = []
     for i in range(n):
@@ -271,8 +218,8 @@ def pops(
         if v > floor_deg and v > ratio * (sum(around) / len(around)):
             out.append(i)
     # A one-frame spike (the pose jumps out and straight back, what key compression does) turns
-    # two big steps in a row, and each hid the other above (found 14 Nov 2026: a 35-degree calf
-    # spike passed). Judge the pair against the steps outside it, and only when the pose comes
+    # two big steps in a row, and each hid the other above (a 35-degree calf
+    # spike passed that way). Judge the pair against the steps outside it, and only when the pose comes
     # back (frame i+2 near frame i): a strike snapping into a new pose is a style, not a pop.
     # Report the jumped-to frame, so the fixer re-keys that pose from the frames either side.
     if skip_angles is None:
@@ -301,8 +248,8 @@ def com(points: Sequence[tuple[Vec, float]]) -> Vec:
 def dist_to_segment2d(p: Sequence[float], a: Sequence[float], b: Sequence[float]) -> float:
     ax, ay, bx, by = a[0], a[1], b[0], b[1]
     dx, dy = bx - ax, by - ay
-    L = dx * dx + dy * dy
-    t = 0.0 if L == 0 else max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / L))
+    len_sq = dx * dx + dy * dy
+    t = 0.0 if len_sq == 0 else max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / len_sq))
     return math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy))
 
 

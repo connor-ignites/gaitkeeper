@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from . import motion_math as mm
+from . import motion_math
 from .names import says_loop
 
 SEAM_WARN_DEG = 5.0  # a bone turning more than this from the last frame back to the first hitches the loop
@@ -25,7 +25,7 @@ Pose = dict[str, Sequence[float]]  # bone -> local rotation quaternion (w, x, y,
 
 def seam_deg(first: Pose, last: Pose) -> float:
     """The biggest bone turn between two poses, in degrees (0 when they share no bones)."""
-    return max((mm.q_angle_deg(first[k], last[k]) for k in first if k in last), default=0.0)
+    return max((motion_math.q_angle_deg(first[k], last[k]) for k in first if k in last), default=0.0)
 
 
 def loops(name: str, first: Pose, last: Pose, frames: int) -> bool:

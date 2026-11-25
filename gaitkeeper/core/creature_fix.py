@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""GaitKeeper: fixing animal clips (Blender). Shared by the command-line jobs and the add-on.
+"""GaitKeeper: fixing animal clips (Blender).
 
 The animal checks judge legs by their line, timing and weight, not by sliding paws (paws roll and
-pivot, and a sliding-paw measure flagged 46 of 113 good Border Collie clips), so the fix mends what the
+pivot, and a sliding-paw measure flagged 46 of 113 good clips in a commercial dog pack), so the fix mends what the
 checks flag: legs that bow out sideways are brought back into line ("legs in line"), joint by joint,
 without moving the planted foot or the move itself.
 """
@@ -15,9 +15,9 @@ import re
 import bpy
 from mathutils import Matrix, Vector
 
-from . import creature as CR
-from . import legs as LG
-from .fix_guard import all_or_nothing
+from . import creature
+from . import legs as leg_checks
+from .fix_guard import REFUSED_WORSE, all_or_nothing
 from .rig import body_axes, clip_range, key_rotation, set_action
 
 
@@ -102,21 +102,22 @@ def _words(line: str) -> str:
 def fix_creature(
     arm: bpy.types.Object,
     act: bpy.types.Action,
-    legs: dict[str, list[str]],
-    pelvis: str,
-    hopper: bool,
-    rest: dict[str, float],
+    animal: creature.AnimalRig,
     scene: bpy.types.Scene,
     view_layer: bpy.types.ViewLayer,
     strike: bool = False,
-    name: str | None = None,
 ) -> tuple[bpy.types.Action | None, dict]:
     """The animal fix on a COPY: bowed legs brought into line. Returns (copy or None, report). None when
     nothing needs it, or when the fix made anything worse (the copy is then deleted). If anything fails
     midway, the copy is removed and the original clip made current again before the error is raised."""
+    legs = animal.legs
     with all_or_nothing(arm):
-        m0, v0 = CR.measure_clip(arm, act, legs, pelvis, hopper, rest, scene, strike)
-        bowed = [k for k, v in m0["legs"].items() if v["bow_share"] > LG.BOW_WARN.get(k.split("_")[0], 0.08)]
+        m0, v0 = creature.measure_clip(arm, act, animal, scene, strike)
+        bowed = [
+            k
+            for k, v in m0["legs"].items()
+            if v["bow_share"] > leg_checks.BOW_WARN.get(k.split("_")[0], leg_checks.BOW_WARN_DEFAULT)
+        ]
         report: dict = {"before": v0, "changes": []}
         if not bowed:
             report["verdict"] = v0
@@ -126,10 +127,10 @@ def fix_creature(
             ]
             set_action(arm, act)
             return None, report
-        fwd = body_axes(arm, CR.leg_roles(arm, legs, pelvis))[0]
+        fwd = body_axes(arm, creature.leg_roles(arm, legs, animal.pelvis))[0]
         new = legs_in_line(arm, act, legs, fwd, tuple(bowed), scene, view_layer)
-        new.name = name or f"{act.name.split('|')[-1]}_fixed"
-        m1, v1 = CR.measure_clip(arm, new, legs, pelvis, hopper, rest, scene, strike)
+        new.name = f"{act.name.split('|')[-1]}_fixed"
+        m1, v1 = creature.measure_clip(arm, new, animal, scene, strike)
         for k in bowed:
             side = "left" if k.endswith("_l") else "right"
             report["changes"].append(
@@ -140,7 +141,7 @@ def fix_creature(
         was = {_words(x) for x in v0}
         report["worse"] = [x for x in v1 if x.startswith(("FAIL", "WARN")) and _words(x) not in was]
         if any(x.startswith("FAIL") for x in report["worse"]):
-            report["verdict"] = [*v1, "REFUSED the fix made this clip worse, so it was thrown away."]
+            report["verdict"] = [*v1, REFUSED_WORSE]
             bpy.data.actions.remove(new)
             set_action(arm, act)
             return None, report

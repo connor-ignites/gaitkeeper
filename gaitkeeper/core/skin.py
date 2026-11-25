@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """GaitKeeper skin checks: is the model rigged so it bends well and loads in a game engine?
 
-Runs inside Blender. Lessons behind each check are in tools/motion/BODY.md (rigging, topology).
+Runs inside Blender. What each check looks for, and why:
 - weights: every vertex follows some bone; weights add up to 1 (auto-normalise)
 - influences: game engines skin with 4 bones a vertex (Unity's default, Godot, Unreal's mobile)
 - control bones: IK targets, poles and controls must not deform the mesh
@@ -13,6 +13,7 @@ Runs inside Blender. Lessons behind each check are in tools/motion/BODY.md (rigg
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -20,11 +21,18 @@ import bpy
 from mathutils import Quaternion, Vector
 
 from .names import has_word
-from .rig import body_axes
+from .rig import TRANSFORMS, body_axes
 
 CONTROL_WORDS = ("ik", "pole", "target", "ctrl", "control", "mch", "helper")
 MAX_INFLUENCES = 4
 COLLAPSE_WARN = 0.25  # the skin round a bent joint shrinks by more than a quarter
+BEND_ANGLE = math.pi / 2  # the bend test folds each elbow and knee this far (90 degrees)
+BEND_REACH = 0.35  # the bend test measures skin within this share of the lower bone's length of the joint
+BEND_MIN_VERTICES = 8  # a joint with less skin than this near it is not judged
+MIN_WEIGHT = 0.001  # smaller weights are rounding noise
+UNWEIGHTED_SUM = 0.01  # a vertex whose weights add up to less than this follows no bone
+NORMALISED_TOL = 0.05  # weights may add up to 1 within this
+CONTROL_WEIGHT = 0.05  # a control bone with more weight than this on a vertex moves the mesh
 
 
 def _meshes(arm: bpy.types.Object) -> list[bpy.types.Object]:
@@ -61,18 +69,18 @@ def skin_report(arm: bpy.types.Object, roles: dict[str, str], view_layer: bpy.ty
         for v in ob.data.vertices:
             total += 1
             ws = [(gname.get(g.group, ""), g.weight) for g in v.groups]
-            ws = [(n, w) for n, w in ws if n in bone_names and n in deforming and w > 0.001]
+            ws = [(n, w) for n, w in ws if n in bone_names and n in deforming and w > MIN_WEIGHT]
             s = sum(w for _, w in ws)
-            if s < 0.01:
+            if s < UNWEIGHTED_SUM:
                 unweighted += 1
                 continue
-            if abs(s - 1) > 0.05:
+            if abs(s - 1) > NORMALISED_TOL:
                 unnormal += 1
             if len(ws) > MAX_INFLUENCES:
                 over += 1
             worst_inf = max(worst_inf, len(ws))
             for n, w in ws:
-                if w > 0.05 and _is_control(n):
+                if w > CONTROL_WEIGHT and _is_control(n):
                     control_deform.add(n)
     out.update(
         vertices=total,
@@ -111,9 +119,6 @@ def _evaluated_positions(meshes: list, view_layer: bpy.types.ViewLayer) -> dict:
         out[ob.name] = [ev.matrix_world @ v.co for v in me.vertices]
         ev.to_mesh_clear()
     return out
-
-
-TRANSFORMS = ("location", "rotation_quaternion", "rotation_euler", "rotation_axis_angle", "scale")
 
 
 @contextmanager
@@ -173,9 +178,9 @@ def _bend_joints(arm: bpy.types.Object, roles: dict[str, str], meshes: list, vie
             continue
         ub, lb = arm.data.bones[up], arm.data.bones[low]
         centre = mw @ lb.head_local
-        radius = 0.35 * lb.length * mw.to_scale().x
+        radius = BEND_REACH * lb.length * mw.to_scale().x
         verts = _skin_near(meshes, up, low, centre, radius)
-        if len(verts) < 8:
+        if len(verts) < BEND_MIN_VERTICES:
             continue
         # the bend axis in world space: knees fold the shin back, elbows fold the forearm forward
         u = (mw.to_3x3() @ (ub.tail_local - ub.head_local)).normalized()
@@ -184,7 +189,7 @@ def _bend_joints(arm: bpy.types.Object, roles: dict[str, str], meshes: list, vie
             continue
         local_axis = (mw.to_3x3() @ lb.matrix_local.to_3x3()).inverted() @ axis.normalized()
         pb = arm.pose.bones[low]
-        pb.rotation_quaternion = Quaternion(local_axis, 1.5708)
+        pb.rotation_quaternion = Quaternion(local_axis, BEND_ANGLE)
         view_layer.update()
         bent = _evaluated_positions(meshes, view_layer)
         pb.rotation_quaternion = (1, 0, 0, 0)

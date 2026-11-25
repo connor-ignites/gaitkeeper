@@ -7,15 +7,15 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import NamedTuple
 
 import bpy
 
-from .core import body as body_checks
-from .core import checks, creature, creature_fix, edit, rig, skin
+from .core import body, checks, creature, creature_fix, edit, rig, skin
 from .core.checks import scene_fps
+from .core.creature import AnimalRig
+from .core.fix import FixContext
 from .core.report import CheckResult
-from .core.rig import action_fcurves
+from .core.rig import TRANSFORMS, action_fcurves
 
 REPORT_NAME = "GaitKeeper report"
 POSE_CLIP = re.compile(r"(^|[^a-z0-9])[ta][ _-]?pose([^a-z0-9]|$)")  # T-pose and A-pose clips, never checked
@@ -34,15 +34,6 @@ BONES_NOT_FOUND = (
 Progress = Callable[[int, int, str], None]  # (clips done, clips in all, the clip starting now)
 
 
-class AnimalRig(NamedTuple):
-    """What the animal checks need to know about a rig."""
-
-    legs: dict[str, list[str]]
-    pelvis: str
-    hopper: bool
-    rest_widths: dict[str, float]
-
-
 def write_report(text: str) -> None:
     """Replace the report text block's contents."""
     block = bpy.data.texts.get(REPORT_NAME) or bpy.data.texts.new(REPORT_NAME)
@@ -58,9 +49,6 @@ def kept_frame(scene: bpy.types.Scene) -> Iterator[None]:
         yield
     finally:
         scene.frame_set(frame)
-
-
-TRANSFORMS = ("location", "rotation_quaternion", "rotation_euler", "rotation_axis_angle", "scale")
 
 
 def _transform(item: bpy.types.Object | bpy.types.PoseBone) -> tuple:
@@ -206,7 +194,7 @@ def check_person(
     fps = scene_fps(scene)
     saved_file = bpy.data.filepath.lower().endswith(".blend")
     report = checks.rig_report(arm, roles)
-    rig_lines = checks.rig_verdicts(report, None)
+    rig_lines = checks.rig_verdicts(report)
     rig_lines += skin.skin_verdicts(skin.skin_report(arm, roles, view_layer), saved_file)
     # a clip on a rig whose bones weren't all found can't honestly PASS
     partly = [NOT_FULLY_CHECKED] if report["missing"] else []
@@ -216,7 +204,7 @@ def check_person(
         cyclic = checks.clip_loops(arm, act, scene, label)
         measured = checks.measure(rig.sample(arm, act, roles, scene), fps, cyclic, arm, label)
         clips[act.name] = partly + checks.verdicts(measured, None)
-    return body_checks.misread_verdicts(clips) + rig_lines, clips
+    return body.misread_verdicts(clips) + rig_lines, clips
 
 
 def check_animal(
@@ -238,9 +226,7 @@ def check_animal(
     strike = scene.gaitkeeper.every_clip_strikes
     clips = {}
     for act in reported(actions, progress):
-        _, verdict = creature.measure_clip(
-            arm, act, animal.legs, animal.pelvis, animal.hopper, animal.rest_widths, scene, strike, enemy=enemy
-        )
+        _, verdict = creature.measure_clip(arm, act, animal, scene, strike, enemy=enemy)
         clips[act.name] = verdict
     return rig_lines, clips
 
@@ -302,21 +288,12 @@ def fixed_copy(
     """The animal fix or the person fix of `act`, as the scene's settings ask."""
     settings = scene.gaitkeeper
     if animal is not None:
-        return creature_fix.fix_creature(
-            arm,
-            act,
-            animal.legs,
-            animal.pelvis,
-            animal.hopper,
-            animal.rest_widths,
-            scene,
-            view_layer,
-            settings.every_clip_strikes,
-        )
+        return creature_fix.fix_creature(arm, act, animal, scene, view_layer, settings.every_clip_strikes)
     root = None if settings.root_motion == "LEAVE" else settings.root_motion.lower()
     label = judged_label(arm, act, settings.attacks_for == "ENEMY")
     cyclic = checks.clip_loops(arm, act, scene, label)
-    return edit.fix_clip(arm, act, rig.role_map(arm), scene_fps(scene), cyclic, scene, view_layer, root, label=label)
+    ctx = FixContext(arm, rig.role_map(arm), scene_fps(scene), cyclic, scene, view_layer)
+    return edit.fix_clip(ctx, act, root, label=label)
 
 
 def fix_report_text(new: bpy.types.Action | None, rep: dict) -> str:

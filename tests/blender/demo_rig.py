@@ -6,7 +6,7 @@ Bones use the common Hips / LeftUpLeg / LeftArm naming. Clips:
 - Walk_Glide: the body travels 1.5 m while both feet stay flat on the floor (the feet skate);
 - Crouch_Idle: holding a crouch, knees bent forward.
 
-build_unity_rig makes the same body the way Unity exports reach Blender (Kevin Iglesias packs): a Root bone
+build_unity_rig makes the same body the way some Unity asset packs reach Blender: a Root bone
 above the hips holds a -90 degree X turn and a 100x scale on every frame, so the rest pose lies flat at a
 hundredth of the size (face down) while every frame stands up at normal size. Key its clips with UNITY_UNIT,
 then hold_root.

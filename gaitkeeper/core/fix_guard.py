@@ -8,6 +8,8 @@ from contextlib import contextmanager
 
 import bpy
 
+REFUSED_WORSE = "REFUSED the fix made this clip worse, so it was thrown away."
+
 
 @contextmanager
 def all_or_nothing(arm: bpy.types.Object) -> Iterator[None]:

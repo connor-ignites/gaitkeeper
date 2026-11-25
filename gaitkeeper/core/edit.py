@@ -1,181 +1,50 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""GaitKeeper: editing a clip in Blender (the Fix button and Pose Adapt).
+"""GaitKeeper: the Fix button's edit of a person's clip, in Blender.
 
-apply_local_and_time works on sampled frames (local pose of every bone); write_action keys them as a
-new action; world_pass then makes the world-space changes per frame (leans, pelvis, bounce) and
-re-plants the feet with two-bone IK so an edit never pushes a foot through the floor or skates it.
-fix_clip runs the standard fix (re-plant feet, close the loop seam, smooth new pops) on a copy.
+fix_clip samples the clip, closes its loop seam on the sampled local poses, keys the result as a new
+action (write_action, also used by Pose Adapt), then re-plants the feet with two-bone IK
+(replant_feet) so the fix never pushes a foot through the floor or skates it. Pops left over are
+smoothed and the result is checked again; a fix that makes the clip worse is thrown away.
 """
 
 from __future__ import annotations
 
-import math
+import dataclasses
 
 import bpy
-from mathutils import Matrix, Quaternion, Vector
+from mathutils import Matrix, Quaternion
 
-from . import motion_math as mm
+from . import motion_math
 from .checks import measure, verdicts
-from .fix import foot_targets, root_motion_pass, smooth_pops, two_bone_ik
-from .fix_guard import all_or_nothing
-from .rig import (
-    Sample,
-    body_axes,
-    clip_range,
-    contact_flags,
-    interp_basis,
-    interp_list,
-    key_rotation,
-    sample,
-    set_action,
-    set_rotation,
-)
+from .fix import MAX_FOOT_NUDGE_M, FixContext, Leg, foot_targets, root_motion_pass, smooth_pops, two_bone_ik
+from .fix_guard import REFUSED_WORSE, all_or_nothing
+from .rig import Sample, clip_range, key_rotation, sample, set_action, set_rotation
+
+LOOP_BLEND_FRAMES = 4  # a loop's last frames are blended into its first pose over this many frames
+POP_PASSES = 3  # smoothing pops can leave new ones next to them: smooth and measure again up to this often
 
 
-def bone_group(group: str, roles: dict[str, str], arm: bpy.types.Object) -> list[str]:
-    g = {
-        "arms": ["upperarm_l", "upperarm_r", "lowerarm_l", "lowerarm_r"],
-        "legs": ["thigh_l", "thigh_r", "calf_l", "calf_r", "foot_l", "foot_r"],
-        "spine": ["spine1", "spine2", "spine3"],
-        "head": ["neck", "head"],
-    }
-    if group == "all":
-        skip = {"root"}
-        return [pb.name for pb in arm.pose.bones if pb.name.lower() not in skip and pb.parent is not None]
-    if group in g:
-        return [roles[r] for r in g[group] if r in roles]
-    if group in roles:
-        return [roles[group]]
-    return [group] if group in arm.pose.bones else []
-
-
-def apply_local_and_time(
-    s: Sample, ops: list[dict], roles: dict[str, str], arm: bpy.types.Object, fps: float, cyclic: bool
-) -> tuple[list[dict], list[dict], list[str]]:
-    """Returns (frames, per-frame world-pass weights, notes)."""
-    frames = [dict(f) for f in s.basis]
-    n = len(frames)
-    notes: list[str] = []
-    wts: dict[str, list[float]] = {}
-
-    # 1. local, axis-free edits at the original timing
-    for op in ops:
-        kind = op["op"]
-        if kind == "exaggerate":
-            names = bone_group(op.get("bones", "all"), roles, arm)
-            fac = float(op["factor"])
-            for nm in names:
-                mean = mm.q_mean([f[nm][1] for f in frames])
-                for f in frames:
-                    loc, q, sc = f[nm]
-                    f[nm] = (loc, mm.q_scale_from(q, mean, fac), sc)
-            notes.append(f"{op.get('bones', 'all')} motion x{fac:.2f}")
-        elif kind == "limp":
-            side = op.get("side", "l")
-            a = float(op.get("amount", 0.6))
-            for role, fac in ((f"calf_{side}", 1 - 0.65 * a), (f"thigh_{side}", 1 - 0.3 * a)):
-                nm = roles.get(role)
-                if not nm:
-                    continue
-                mean = mm.q_mean([f[nm][1] for f in frames])
-                for f in frames:
-                    loc, q, sc = f[nm]
-                    f[nm] = (loc, mm.q_scale_from(q, mean, fac), sc)
-            other = "r" if side == "l" else "l"
-            hurt = mm.smooth_weights([1.0 if c else 0.0 for c in contact_flags(s, side, fps, cyclic)], 2, cyclic)
-            good = mm.smooth_weights([1.0 if c else 0.0 for c in contact_flags(s, other, fps, cyclic)], 2, cyclic)
-            wts["limp_hurt"] = hurt
-            wts["limp_rates"] = [1 + 0.7 * a * h - 0.3 * a * g for h, g in zip(hurt, good)]
-            wts["limp_amount"] = [a] * n
-            wts["limp_side"] = [0.0 if side == "l" else 1.0] * n
-            notes.append(f"limp on the {'left' if side == 'l' else 'right'} leg ({a:.2f})")
-
-    # the original feet's world rotation travels with the timing, so planted feet keep their roll
-    for side in "lr":
-        nm = roles.get(f"foot_{side}")
-        if nm:
-            ref = s.world_q[0][nm]
-            qs = [mm.q_align(w[nm], ref) for w in s.world_q]
-            for c in range(4):
-                wts[f"footq_{side}_{c}"] = [q[c] for q in qs]
-        if f"ankle_{side}" in s.world[0]:
-            wts[f"anklez_{side}"] = [w[f"ankle_{side}"][2] for w in s.world]
-
-    # 2. time edits
-    times = list(range(n))
-    if "limp_rates" in wts:
-        times = mm.timewarp(wts["limp_rates"])
-    speed = 1.0
-    for op in ops:
-        if op["op"] == "speed":
-            speed *= float(op["factor"])
-    if abs(speed - 1) > 1e-3:
-        src = mm.resample_times(len(times), speed)
-        times = [interp_list([float(t) for t in times], t) for t in src]
-        notes.append(f"{speed:.2f}x as long ({'slower' if speed > 1 else 'faster'})")
-    if times != list(range(n)):
-        frames = [interp_basis(frames, t) for t in times]
-        wts = {k: [interp_list(v, t) for t in times] for k, v in wts.items()}
-
-    # 3. smoothing and loop seam
-    for op in ops:
-        if op["op"] == "smooth":
-            r = int(op.get("radius", 1))
-            names = list(frames[0].keys())
-            new = []
-            for i in range(len(frames)):
-                fr = {}
-                for nm in names:
-                    qs, ls = [], []
-                    for k in range(-r, r + 1):
-                        j = (i + k) % len(frames) if cyclic else max(0, min(len(frames) - 1, i + k))
-                        qs.append(frames[j][nm][1])
-                        ls.append(frames[j][nm][0])
-                    loc = tuple(sum(c) / len(ls) for c in zip(*ls))
-                    fr[nm] = (loc, mm.q_mean(qs), frames[i][nm][2])
-                new.append(fr)
-            frames = new
-            notes.append(f"smoothed (radius {r})")
-    if cyclic or any(op["op"] == "fix_loop" for op in ops):
-        blend = next((int(op.get("frames", 4)) for op in ops if op["op"] == "fix_loop"), 3)
-        w = mm.loop_blend_weights(len(frames), blend)
-        first = frames[0]
-        for i, wi in enumerate(w):
-            if wi <= 0:
-                continue
-            fr = {}
-            for nm, (loc, q, sc) in frames[i].items():
-                l0, q0, _s0 = first[nm]
-                fr[nm] = (tuple(x + (y - x) * wi for x, y in zip(loc, l0)), mm.q_slerp(q, q0, wi), sc)
-            frames[i] = fr
-
-    world_ops = [op for op in ops if op["op"] in ("lean", "head", "pelvis", "bounce")]
-    per_frame: list[dict] = [{} for _ in frames]
-    for i in range(len(frames)):
-        for k, v in wts.items():
-            per_frame[i][k] = v[i]
-    for op in world_ops:
-        notes.append(describe(op))
-    return frames, per_frame, notes
-
-
-def describe(op: dict) -> str:
-    k = op["op"]
-    if k == "lean":
-        return f"lean {op.get('dir', 'forward')} {float(op.get('degrees', 0)):.0f} degrees"
-    if k == "head":
-        return (
-            f"head {'down' if float(op.get('degrees', 0)) > 0 else 'up'} {abs(float(op.get('degrees', 0))):.0f} degrees"
-        )
-    if k == "pelvis":
-        drop = float(op.get("drop", 0))
-        return f"hips {'lower' if drop > 0 else 'higher'} by {abs(drop) * 100:.0f} cm"
-    if k == "bounce":
-        return f"up-down bounce x{float(op.get('factor', 1)):.2f}"
-    return k
+def close_loop_seam(frames: list[dict], blend: int) -> list[dict]:
+    """The local poses with the first pose blended into the last `blend` frames, so the loop joins up."""
+    first = frames[0]
+    out = list(frames)
+    for i, weight in enumerate(motion_math.loop_blend_weights(len(frames), blend)):
+        if weight <= 0:
+            continue
+        pose = {}
+        for name, (loc, q, scale) in frames[i].items():
+            loc0, q0, _ = first[name]
+            pose[name] = (
+                tuple(x + (y - x) * weight for x, y in zip(loc, loc0)),
+                motion_math.q_slerp(q, q0, weight),
+                scale,
+            )
+        out[i] = pose
+    return out
 
 
 def write_action(arm: bpy.types.Object, frames: list[dict], name: str) -> bpy.types.Action:
+    """Key every bone's local pose on every frame into a new action, made current."""
     act = bpy.data.actions.new(name)
     set_action(arm, act)
     for i, fr in enumerate(frames):
@@ -189,193 +58,127 @@ def write_action(arm: bpy.types.Object, frames: list[dict], name: str) -> bpy.ty
     return act
 
 
-def rotate_about(
-    pb: bpy.types.PoseBone, axis: Vector, deg: float, arm: bpy.types.Object, view_layer: bpy.types.ViewLayer
-) -> None:
-    """Rotate a pose bone about a world axis through its head, keeping children attached."""
-    if abs(deg) < 1e-4:
-        return
-    inv = arm.matrix_world.to_3x3().inverted()
-    ax = (inv @ axis).normalized()
-    R = Quaternion(ax, math.radians(deg)).to_matrix().to_4x4()
-    h = pb.head.copy()
-    pb.matrix = Matrix.Translation(h) @ R @ Matrix.Translation(-h) @ pb.matrix
-    view_layer.update()
-
-
-def world_pass(
-    arm: bpy.types.Object,
-    act: bpy.types.Action,
-    ops: list[dict],
-    per_frame: list[dict],
-    roles: dict[str, str],
-    fps: float,
-    cyclic: bool,
-    floor: dict[str, float],
-    scene: bpy.types.Scene,
-    view_layer: bpy.types.ViewLayer,
-) -> None:
-    world_ops = [op for op in ops if op["op"] in ("lean", "head", "pelvis", "bounce")]
-    limp = any("limp_hurt" in p for p in per_frame)
-    lock = limp or any(op["op"] in ("lock_feet", "limp", "speed", "exaggerate", "smooth") for op in ops)
-    if not world_ops and not lock:
-        return
-    fwd, right, _up = body_axes(arm, roles)
-    inv = arm.matrix_world.inverted()
-    hips = arm.pose.bones.get(roles.get("hips", ""))
+def leg_chains(arm: bpy.types.Object, roles: dict[str, str]) -> list[Leg]:
+    """(thigh, calf, foot) pose bones of each leg whose three bones were all found."""
     legs = []
     for side in "lr":
         names = [roles.get(f"{r}_{side}") for r in ("thigh", "calf", "foot")]
         if all(names):
             legs.append(tuple(arm.pose.bones[nm] for nm in names))  # type: ignore[index]
-    n = len(per_frame)
-    # pelvis heights of the (time-edited) motion, for bounce
-    hz = []
-    for f in range(n):
-        scene.frame_set(f)
-        hz.append(hips.head.z if hips else 0.0)
-    mean_z = sum(hz) / max(1, len(hz))
-    spine = [arm.pose.bones[roles[r]] for r in ("spine1", "spine2", "spine3") if r in roles]
-    headb = [arm.pose.bones[roles[r]] for r in ("neck", "head") if r in roles]
-    orig_z = {
-        roles[f"foot_{sd}"]: [p.get(f"anklez_{sd}", -math.inf) for p in per_frame]
-        for sd in "lr"
-        if roles.get(f"foot_{sd}") and f"anklez_{sd}" in per_frame[0]
-    }
-    targets = (
-        foot_targets(
-            arm,
-            legs,
-            n,
-            fps,
-            cyclic,
-            floor,
-            roles,
-            orig_z,
-            scene,
-            0.08 if any(op["op"] == "lock_feet" for op in ops) else None,
-        )
-        if lock
-        else {}
-    )
-    side_of = {roles.get("foot_l"): "l", roles.get("foot_r"): "r"}
-    inv3 = arm.matrix_world.to_3x3().inverted()
+    return legs
 
-    def foot_rot(foot: bpy.types.PoseBone, f: int) -> Matrix:
-        p, sd = per_frame[f], side_of.get(foot.name)
-        if lock and sd and f"footq_{sd}_0" in p:
-            q = Quaternion(mm.q_norm([p[f"footq_{sd}_{c}"] for c in range(4)]))
-            return (inv3 @ q.to_matrix()).to_4x4()
+
+def ankle_heights(s: Sample, roles: dict[str, str]) -> dict[str, list[float]]:
+    """Each foot bone's original ankle height on every frame."""
+    return {
+        roles[f"foot_{side}"]: [w[f"ankle_{side}"][2] for w in s.world]
+        for side in "lr"
+        if roles.get(f"foot_{side}") and f"ankle_{side}" in s.world[0]
+    }
+
+
+def foot_rotations(s: Sample, roles: dict[str, str]) -> dict[str, list[tuple]]:
+    """Each foot bone's original world rotation on every frame (kept on one hemisphere), so a re-planted
+    foot keeps its roll."""
+    out = {}
+    for side in "lr":
+        name = roles.get(f"foot_{side}")
+        if name:
+            ref = s.world_q[0][name]
+            out[name] = [motion_math.q_norm(motion_math.q_align(w[name], ref)) for w in s.world_q]
+    return out
+
+
+def replant_feet(ctx: FixContext, n: int, heights: dict[str, list[float]], rotations: dict[str, list[tuple]]) -> None:
+    """Lock each planted foot in place (nudged at most MAX_FOOT_NUDGE_M) with two-bone IK, giving it back
+    its original world rotation, and key the result on every frame."""
+    arm = ctx.arm
+    legs = leg_chains(arm, ctx.roles)
+    targets = foot_targets(ctx, legs, n, heights, MAX_FOOT_NUDGE_M)
+    to_armature = arm.matrix_world.to_3x3().inverted()
+
+    def foot_matrix(foot: bpy.types.PoseBone, f: int) -> Matrix:
+        if foot.name in rotations:
+            return (to_armature @ Quaternion(rotations[foot.name][f]).to_matrix()).to_4x4()
         return foot.matrix.to_3x3().to_4x4()
 
     for f in range(n):
-        scene.frame_set(f)
-        plant = {
-            foot.name: (targets[foot.name][f] if lock else foot.head.copy(), foot_rot(foot, f)) for _, _, foot in legs
-        }
-        moved_hips = lock
-        for op in world_ops:
-            k = op["op"]
-            if k == "lean" and spine:
-                deg = float(op.get("degrees", 0)) / len(spine)
-                d = op.get("dir", "forward")
-                axis, sign = {"forward": (right, -1), "back": (right, 1), "left": (fwd, -1), "right": (fwd, 1)}[d]
-                for pb in spine:
-                    rotate_about(pb, axis, sign * deg, arm, view_layer)
-            elif k == "head" and headb:
-                deg = float(op.get("degrees", 0)) / len(headb)
-                for pb in headb:
-                    rotate_about(pb, right, -deg, arm, view_layer)
-            elif k == "pelvis" and hips:
-                drop = float(op.get("drop", 0))
-                hips.matrix = Matrix.Translation(inv.to_3x3() @ Vector((0, 0, -drop))) @ hips.matrix
-                view_layer.update()
-                moved_hips = True
-            elif k == "bounce" and hips:
-                fac = float(op.get("factor", 1))
-                dz = (hz[f] - mean_z) * (fac - 1)
-                hips.matrix = Matrix.Translation(Vector((0, 0, dz))) @ hips.matrix
-                view_layer.update()
-                moved_hips = True
-        if limp and spine:
-            p = per_frame[f]
-            a, w = p.get("limp_amount", 0.0), p.get("limp_hurt", 0.0)
-            toward = "left" if p.get("limp_side", 0.0) < 0.5 else "right"
-            axis, sign = (fwd, -1) if toward == "left" else (fwd, 1)
-            for pb in spine:
-                rotate_about(pb, axis, sign * 9 * a * w / len(spine), arm, view_layer)
-            if hips:  # the body dips onto the hurt leg and hurries off it
-                hips.matrix = Matrix.Translation(Vector((0, 0, -0.025 * a * w))) @ hips.matrix
-                view_layer.update()
-                moved_hips = True
-        if moved_hips:
-            for thigh, calf, foot in legs:
-                tgt, rot = plant[foot.name]
-                two_bone_ik(arm, thigh, calf, foot, tgt, rot, view_layer)
+        ctx.scene.frame_set(f)
+        plant = {foot.name: (targets[foot.name][f], foot_matrix(foot, f)) for _, _, foot in legs}
+        for thigh, calf, foot in legs:
+            target, rotation = plant[foot.name]
+            two_bone_ik(arm, thigh, calf, foot, target, rotation, ctx.view_layer)
         for pb in arm.pose.bones:
             pb.keyframe_insert("location", frame=f, group=pb.name)
             key_rotation(pb, f)
 
 
 def fix_clip(
-    arm: bpy.types.Object,
-    act: bpy.types.Action,
-    roles: dict[str, str],
-    fps: float,
-    cyclic: bool,
-    scene: bpy.types.Scene,
-    view_layer: bpy.types.ViewLayer,
-    root_motion: str | None = None,
-    name: str | None = None,
-    label: str | None = None,
+    ctx: FixContext, act: bpy.types.Action, root_motion: str | None = None, label: str | None = None
 ) -> tuple[bpy.types.Action | None, dict]:
-    """The standard fix on a COPY of the clip: feet re-planted (nudged at most 8 cm), the loop seam
-    closed, pops smoothed (the clip's own too), root motion extracted or removed if asked. The clip is
-    played on `scene`; bone edits are evaluated through `view_layer`. The original is never touched.
-    Returns (new action, report); the new action is None (and deleted) if the fix made anything worse that
-    the checks call a FAIL. If anything fails midway, every action it made is removed and the original clip
-    made current again before the error is raised."""
-    with all_or_nothing(arm):
+    """The standard fix on a COPY of the clip: feet re-planted (nudged at most MAX_FOOT_NUDGE_M), the loop
+    seam closed, pops smoothed (the clip's own too), root motion extracted or removed if asked. The
+    original is never touched. Returns (new action, report); the new action is None (and deleted) if the
+    fix made anything worse that the checks call a FAIL. If anything fails midway, every action it made is
+    removed and the original clip made current again before the error is raised."""
+    with all_or_nothing(ctx.arm):
         label = label or act.name
-        before = sample(arm, act, roles, scene)
-        report: dict = {"original": measure(before, fps, cyclic, arm, label)}
+        before = sample(ctx.arm, act, ctx.roles, ctx.scene)
+        report: dict = {"original": measure(before, ctx.fps, ctx.cyclic, ctx.arm, label)}
         if report["original"].get("travels"):
-            cyclic = False  # a travelling loop keeps its seam: blending end into start would undo the travel
-        if report["original"]["pops"]:  # smooth the clip's own pops first, on a scratch copy
-            src = act.copy()
-            try:
-                set_action(arm, src)
-                smooth_pops(arm, report["original"]["pops"], len(before.world), scene, clip_range(act)[0])
-                before = sample(arm, src, roles, scene)
-            finally:
-                set_action(arm, act)
-                bpy.data.actions.remove(src)
-        ops = [{"op": "lock_feet"}] + ([{"op": "fix_loop", "frames": 4}] if cyclic else [])
-        frames, per_frame, notes = apply_local_and_time(before, ops, roles, arm, fps, cyclic)
-        new = write_action(arm, frames, name or f"{act.name}_fixed")
-        floor = {}
-        for side in "lr":
-            fb = roles.get(f"foot_{side}")
-            if fb and f"ankle_{side}" in before.world[0]:
-                floor[fb] = min(w[f"ankle_{side}"][2] for w in before.world)
-        world_pass(arm, new, ops, per_frame, roles, fps, cyclic, floor, scene, view_layer)
-        if root_motion in ("extract", "in_place"):
-            notes.append(root_motion_pass(arm, roles, len(frames), root_motion, scene, view_layer))
-        report["result"] = measure(sample(arm, new, roles, scene), fps, cyclic, arm, label)
-        for _ in range(3):  # smooth every pop left (the clip's own and any the fix made), measure again
-            fresh = dict(report["result"]["pops"])
-            if not fresh:
-                break
-            smooth_pops(arm, fresh, len(frames), scene)
-            report["result"] = measure(sample(arm, new, roles, scene), fps, cyclic, arm, label)
-        notes.append("feet re-planted" + (", loop seam closed" if cyclic else ""))
+            # a travelling loop keeps its seam: blending end into start would undo the travel
+            ctx = dataclasses.replace(ctx, cyclic=False)
+        if report["original"]["pops"]:
+            before = _without_own_pops(ctx, act, report["original"]["pops"], len(before.world))
+        new, notes = _fixed_copy(ctx, act, before, root_motion)
+        report["result"] = _smoothed_result(ctx, new, len(before.world), label)
+        notes.append("feet re-planted" + (", loop seam closed" if ctx.cyclic else ""))
         report["changes"] = notes
         report["verdict"] = verdicts(report["original"], report["result"], fixing=True)
         was = verdicts(report["original"], None)
         if any(v.startswith("FAIL") and v not in was for v in report["verdict"]):
-            report["verdict"].append("REFUSED the fix made this clip worse, so it was thrown away.")
+            report["verdict"].append(REFUSED_WORSE)
             bpy.data.actions.remove(new)
-            set_action(arm, act)
+            set_action(ctx.arm, act)
             return None, report
         new.use_fake_user = True
         return new, report
+
+
+def _without_own_pops(ctx: FixContext, act: bpy.types.Action, pops: dict[str, list[int]], n: int) -> Sample:
+    """The clip sampled after smoothing its own pops on a scratch copy; the clip itself is left as it was."""
+    scratch = act.copy()
+    try:
+        set_action(ctx.arm, scratch)
+        smooth_pops(ctx.arm, pops, n, ctx.scene, clip_range(act)[0])
+        return sample(ctx.arm, scratch, ctx.roles, ctx.scene)
+    finally:
+        set_action(ctx.arm, act)
+        bpy.data.actions.remove(scratch)
+
+
+def _fixed_copy(
+    ctx: FixContext, act: bpy.types.Action, before: Sample, root_motion: str | None
+) -> tuple[bpy.types.Action, list[str]]:
+    """The new action: loop seam closed, feet re-planted, root motion handled. Returns it and its notes."""
+    frames = [dict(f) for f in before.basis]
+    if ctx.cyclic:
+        frames = close_loop_seam(frames, LOOP_BLEND_FRAMES)
+    new = write_action(ctx.arm, frames, f"{act.name}_fixed")
+    replant_feet(ctx, len(frames), ankle_heights(before, ctx.roles), foot_rotations(before, ctx.roles))
+    notes = []
+    if root_motion in ("extract", "in_place"):
+        notes.append(root_motion_pass(ctx, len(frames), root_motion))
+    return new, notes
+
+
+def _smoothed_result(ctx: FixContext, new: bpy.types.Action, n: int, label: str) -> dict:
+    """Smooth every pop left in `new` (the clip's own and any the fix made) and measure it again."""
+    result = measure(sample(ctx.arm, new, ctx.roles, ctx.scene), ctx.fps, ctx.cyclic, ctx.arm, label)
+    for _ in range(POP_PASSES):
+        fresh = dict(result["pops"])
+        if not fresh:
+            break
+        smooth_pops(ctx.arm, fresh, n, ctx.scene)
+        result = measure(sample(ctx.arm, new, ctx.roles, ctx.scene), ctx.fps, ctx.cyclic, ctx.arm, label)
+    return result

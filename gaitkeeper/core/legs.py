@@ -5,7 +5,7 @@ the body carry weight? Pure Python; creature.py finds the legs in Blender and fe
 A leg is a chain of joints from its top (hip or shoulder) to its end (toe or paw), with a side
 (l or r) and an end (hind or fore). Per frame we get every joint's position, plus the pelvis.
 
-Rules (BODY.md, part 11):
+Rules:
 - legs swing fore and aft in the body's side plane: a knee or hock that bows outward from the
   line between the hip and the foot reads as splayed (frog legs)
 - feet land under the hips: feet much wider than the hips read as straddling
@@ -18,10 +18,11 @@ from __future__ import annotations
 import itertools
 from collections.abc import Sequence
 
-from . import body_rules as br
-from . import reactions as RX
+from . import body_rules, reactions
 
-BOW_WARN = {"hind": 0.06, "fore": 0.18}  # share of the leg; a pro collie pack: hind 1-2% straight, fore 10-13%
+BOW_WARN = {"hind": 0.06, "fore": 0.18}  # share of the leg; a good dog pack bows hind 1-2%, fore 10-13%
+BOW_WARN_DEFAULT = 0.08  # for a leg that is neither hind nor fore
+CONTACT_TOL_M = 0.03  # a leg's end within this of the floor is down
 TURN_WORDS = ("l", "r", "bl", "br", "fl", "fr", "left", "right", "turn", "pivot", "strafe")
 MOVING = ("walk", "trot", "run", "hop", "gallop", "canter", "sprint", "jog", "jump", "leap", "bound", "charge", "lope")
 FLYING = ("hop", "jump", "run", "leap", "bound", "gallop", "sprint", "charge")
@@ -30,9 +31,9 @@ SPRING_MIN = 0.06  # a hop's landing sinks the hips at least 6% of the leg's len
 HOP_RATE = (1.25, 3.0)  # kangaroos: about 1.3-1.5 hops a second slow, 2-2.3 fast (measured on reference footage)
 
 
-def lateral(top_l: Sequence[float], top_r: Sequence[float]) -> br.Vec:
+def lateral(top_l: Sequence[float], top_r: Sequence[float]) -> body_rules.Vec:
     """The body's right, from the two hips (or shoulders), flat on the ground."""
-    return br.flat(br.sub(top_r, top_l))
+    return body_rules.flat(body_rules.sub(top_r, top_l))
 
 
 def bow(joints: Sequence[Sequence[float]], right: Sequence[float], side: str) -> float:
@@ -43,82 +44,93 @@ def bow(joints: Sequence[Sequence[float]], right: Sequence[float], side: str) ->
     worst = 0.0
     for j in joints[1:-1]:
         # where the line top->end passes at this joint's height along the leg
-        ab = br.sub(end, top)
-        t = max(0.0, min(1.0, br.dot(br.sub(j, top), ab) / max(1e-9, br.dot(ab, ab))))
-        on_line = br.add(top, br.scale(ab, t))
-        worst = max(worst, sign * br.dot(br.sub(j, on_line), right))
+        ab = body_rules.sub(end, top)
+        t = max(0.0, min(1.0, body_rules.dot(body_rules.sub(j, top), ab) / max(1e-9, body_rules.dot(ab, ab))))
+        on_line = body_rules.add(top, body_rules.scale(ab, t))
+        worst = max(worst, sign * body_rules.dot(body_rules.sub(j, on_line), right))
     return worst
 
 
 def leg_length(joints: Sequence[Sequence[float]]) -> float:
-    return sum(br.length(br.sub(b, a)) for a, b in itertools.pairwise(joints)) or 1.0
+    return sum(body_rules.length(body_rules.sub(b, a)) for a, b in itertools.pairwise(joints)) or 1.0
 
 
-def contacts(ends: Sequence[Sequence[float]], fps: float, cyclic: bool, floor: float | None = None) -> list[bool]:
+def contacts(ends: Sequence[Sequence[float]], floor: float | None = None) -> list[bool]:
+    """Frames where a leg's end is down: within CONTACT_TOL_M of the floor. By height only: in an
+    in-place cycle a planted foot slides back at the ground speed on purpose."""
     h = [p[2] for p in ends]
-    n = len(ends)
-    sp = []
-    for i in range(n):
-        j = (i + 1) % n if cyclic else min(i + 1, n - 1)
-        k = i if j != i else max(0, i - 1)
-        sp.append(br.length(br.sub(ends[j if j != i else i], ends[k])) * fps)
     floor = min(h) if floor is None else floor
-    # by height only: in an in-place cycle a planted foot slides back at the ground speed on purpose
-    return [hh <= floor + 0.03 for hh in h]
+    return [hh <= floor + CONTACT_TOL_M for hh in h]
 
 
 def measure(
     legs: dict[str, list[list[Sequence[float]]]],
     pelvis: Sequence[Sequence[float]],
     fps: float,
-    cyclic: bool,
     rest_width: dict[str, float] | None = None,
 ) -> dict:
     """legs: name ("hind_l", "fore_r", ...) -> per frame, its joints top to end."""
-    n = len(pelvis)
     out: dict = {"legs": {}, "rest_width": rest_width or {}}
-    flags = {}
+    flags: dict[str, list[bool]] = {}
     floor = min(fr[-1][2] for leg in legs.values() for fr in leg)  # one floor for every foot
     for end in ("hind", "fore"):
-        if f"{end}_l" not in legs or f"{end}_r" not in legs:
-            continue
-        L, R = legs[f"{end}_l"], legs[f"{end}_r"]
-        ln = (leg_length(L[0]) + leg_length(R[0])) / 2
-        worst_bow = {"l": 0.0, "r": 0.0}
-        width = []
-        for i in range(n):
-            right = lateral(L[i][0], R[i][0])
-            for side, leg in (("l", L), ("r", R)):
-                worst_bow[side] = max(worst_bow[side], bow(leg[i], right, side))
-            hips_w = br.dot(br.sub(R[i][0], L[i][0]), right)
-            feet_w = br.dot(br.sub(R[i][-1], L[i][-1]), right)
-            width.append(feet_w / hips_w if hips_w > 1e-6 else 1.0)
-        for side, leg in (("l", L), ("r", R)):
-            flags[f"{end}_{side}"] = contacts([fr[-1] for fr in leg], fps, cyclic, floor)
-            out["legs"][f"{end}_{side}"] = {
-                "bow_share": round(worst_bow[side] / ln, 3),
-                "bow_cm": round(worst_bow[side] * 100, 1),
-                "down_share": round(sum(flags[f"{end}_{side}"]) / n, 2),
-            }
-        out[f"{end}_feet_width_ratio"] = round(sorted(width)[len(width) // 2], 2)
-        out[f"{end}_leg_m"] = round(ln, 3)
-    if not flags:
-        return out
+        if f"{end}_l" in legs and f"{end}_r" in legs:
+            _measure_pair(end, legs[f"{end}_l"], legs[f"{end}_r"], floor, out, flags)
+    if flags:
+        _measure_hops(flags, pelvis, fps, out)
+    return out
+
+
+def _measure_pair(
+    end: str,
+    left_leg: list[list[Sequence[float]]],
+    right_leg: list[list[Sequence[float]]],
+    floor: float,
+    out: dict,
+    flags: dict[str, list[bool]],
+) -> None:
+    """One pair of legs (hind or fore): bow, feet width and time down, into `out`; contacts into `flags`."""
+    n = len(left_leg)
+    ln = (leg_length(left_leg[0]) + leg_length(right_leg[0])) / 2
+    worst_bow = {"l": 0.0, "r": 0.0}
+    width = []
+    for i in range(n):
+        right = lateral(left_leg[i][0], right_leg[i][0])
+        for side, leg in (("l", left_leg), ("r", right_leg)):
+            worst_bow[side] = max(worst_bow[side], bow(leg[i], right, side))
+        hips_w = body_rules.dot(body_rules.sub(right_leg[i][0], left_leg[i][0]), right)
+        feet_w = body_rules.dot(body_rules.sub(right_leg[i][-1], left_leg[i][-1]), right)
+        width.append(feet_w / hips_w if hips_w > 1e-6 else 1.0)
+    for side, leg in (("l", left_leg), ("r", right_leg)):
+        flags[f"{end}_{side}"] = contacts([fr[-1] for fr in leg], floor)
+        out["legs"][f"{end}_{side}"] = {
+            "bow_share": round(worst_bow[side] / ln, 3),
+            "bow_cm": round(worst_bow[side] * 100, 1),
+            "down_share": round(sum(flags[f"{end}_{side}"]) / n, 2),
+        }
+    out[f"{end}_feet_width_ratio"] = round(sorted(width)[len(width) // 2], 2)
+    out[f"{end}_leg_m"] = round(ln, 3)
+
+
+def _measure_hops(flags: dict[str, list[bool]], pelvis: Sequence[Sequence[float]], fps: float, out: dict) -> None:
+    """Whether the feet land together, time in the air, the fall and hang time in each flight, and how far
+    the body sinks on landing, into `out`."""
+    n = len(pelvis)
     # the pair lands together (a hop) or takes turns (a walk, trot, run)?
     hind = [k for k in flags if k.startswith("hind")] or list(flags)
     together = sum(1 for i in range(n) if all(flags[k][i] for k in hind) or not any(flags[k][i] for k in hind))
     out["hind_in_step"] = round(together / n, 2)
     air = [not any(f[i] for f in flags.values()) for i in range(n)]
     out["air_share"] = round(sum(air) / n, 2)
-    runs = br.true_runs(air)
+    runs = body_rules.true_runs(air)
     falls, hangs = [], []
     for st, ln_ in runs:
         if ln_ >= 6 and st > 0 and st + ln_ < n:
             zs = [pelvis[i][2] for i in range(st, st + ln_)]
             top = zs.index(max(zs))
             if 2 <= top <= ln_ - 3:
-                falls.append(round(-br.fall_acceleration(zs, fps), 1))
-                h = RX.hang_share(zs)
+                falls.append(round(-body_rules.fall_acceleration(zs, fps), 1))
+                h = reactions.hang_share(zs)
                 if h is not None:
                     hangs.append(h)
     out["air_gravity_m_s2"] = falls
@@ -127,13 +139,12 @@ def measure(
     leg_m = out.get("hind_leg_m", 1.0)
     down = [not a for a in air]
     sinks = []
-    for st, ln_ in br.true_runs(down):
+    for st, ln_ in body_rules.true_runs(down):
         seg = [pelvis[i][2] for i in range(st, st + ln_)]
         if len(seg) >= 2:
             sinks.append((seg[0] - min(seg)) / leg_m)
     out["landing_sink_share"] = round(max(sinks), 3) if sinks else 0.0
     out["cycle_s"] = round((n - 1) / fps, 3)
-    return out
 
 
 def verdicts(m: dict, name: str, hopper: bool) -> list[str]:
@@ -146,7 +157,7 @@ def verdicts(m: dict, name: str, hopper: bool) -> list[str]:
     moving = any(w.startswith(k) for w in ws for k in MOVING) and not turning
     for leg, v in m.get("legs", {}).items():
         end, side = leg.split("_")
-        if v["bow_share"] > BOW_WARN.get(end, 0.08) and moving:
+        if v["bow_share"] > BOW_WARN.get(end, BOW_WARN_DEFAULT) and moving:
             joint = "knee" if end == "hind" else "elbow"
             msgs.append(
                 f"WARN {'left' if side == 'l' else 'right'} {end} leg: the {joint} bows {v['bow_cm']:.0f} cm out "
@@ -183,7 +194,7 @@ def verdicts(m: dict, name: str, hopper: bool) -> list[str]:
                 "hop and 2 to 2.3 at speed (they go faster mostly with longer hops). Make the cycle 0.45-0.75 s."
             )
     if any(w.startswith(k) for w in ws for k in FLYING):
-        msgs += RX.hang_verdicts(m.get("hang_share", []))
+        msgs += reactions.hang_verdicts(m.get("hang_share", []))
     for g in m.get("air_gravity_m_s2", []) if any(w.startswith(k) for w in ws for k in FLYING) else []:
         if g < 6.5 or g > 14:
             msgs.append(

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """How a human body can and can't move, as measurements. Pure Python (no Blender, no numpy).
 
-Every limit here comes from BODY.md (anatomy ranges, balance, gait, physics, game attack timing).
+Every limit here is a measured range (anatomy, balance, gait, physics, game attack timing), with
+its source or typical values noted beside it.
 Positions are (x, y, z) in metres, Z up. Quaternions are (w, x, y, z).
 """
 
@@ -26,10 +27,12 @@ SPINE_TWIST_FAIL = 80.0  # chest against hips about the spine: 40-60 normal
 SPINE_BEND_FAIL = 110.0  # chest against hips, bending: 80-90 normal (more comes from the hips)
 WRIST_BEND_FAIL = 100.0  # hand against forearm: flex 80, extend 70, side 20-30
 HIP_EXTENSION_WARN = 50.0  # thigh behind the trunk: 10-20 walking, about 30 sprinting
+OFF_BALANCE_WARN_M = 0.08  # the body's weight this far outside the planted feet would tip it over
 
 # Readings no body could make, even a broken clip: past these the tool is more likely misreading the rig (bone
-# directions, rest pose, a root turn) than the clip being wrong. 12 Nov 2026: every Kevin Iglesias clip read upside
-# down, and the Starter Assets walk read "knee bends backwards 73 degrees" and a thigh "swung 180": all tool misreads.
+# directions, rest pose, a root turn) than the clip being wrong. On one commercial pack every clip read upside
+# down, and Unity's Starter Assets walk read "knee bends backwards 73 degrees" and a thigh "swung 180": all
+# tool misreads.
 # A clip's FAIL past these gets a note (measure on the bones first); the same one in most clips of a pack is a
 # rig-level "TOOL?" (body.misread_verdicts). Size alone can't tell: a mirrored knee is a real fault at 60-70.
 MISREAD_DEG = {

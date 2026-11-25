@@ -75,7 +75,7 @@ class BodyVerdicts(unittest.TestCase):
         self.assertEqual(body.misread_verdicts({"Walk": mad, "Run": mad}), [])  # two clips: too few to say
 
     def test_a_persons_windup_faster_than_the_punch_warns(self):
-        """People get the animals' wind-up split (0.8): a hand that draws back faster than it punches."""
+        """People get the animals' wind-up split: a hand that draws back faster than it punches."""
         from types import SimpleNamespace
 
         def punch(back_step: float, hit_step: float) -> list[str]:

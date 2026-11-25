@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Review fixes, run inside Blender by tests/test_blender_review_fixes.py:
+"""Regression checks, run inside Blender by tests/test_blender_regressions.py:
 
-    blender -b --factory-startup --python tests/blender/review_fixes.py -- gaitkeeper-X.Y.Z.zip
+    blender -b --factory-startup --python tests/blender/regressions.py -- gaitkeeper-X.Y.Z.zip
 
 - clip names are read by whole words: a skating "Soldier_Walk" or "Troll_Run" is still judged as a walk or run;
 - bone names too: hind legs named RearLeg_L ("ear" inside) are found;
 - the bend test puts rotation modes, pose and clip back even when it fails midway;
 - Fix is all or nothing: failing midway leaves no new action and the original clip current;
 - one loop rule for people and animals: a clip ending in its first pose loops, one ending elsewhere doesn't.
-Prints one "REVIEW ..." line per step and exits 1 on the first failure.
+Prints one "REGRESSION ..." line per step and exits 1 on the first failure.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ PACKAGE = "bl_ext.user_default.gaitkeeper"
 
 
 def step(name: str, ok: bool, detail: str = "") -> None:
-    print(f"REVIEW {'ok  ' if ok else 'FAIL'} {name} {detail}".rstrip())
+    print(f"REGRESSION {'ok  ' if ok else 'FAIL'} {name} {detail}".rstrip())
     if not ok:
         sys.exit(1)
 
@@ -133,7 +133,7 @@ def person_fix_is_all_or_nothing() -> None:
     fresh_scene()
     arm = demo_rig.build_rig()
     act = glide(arm, "Walk_Glide")
-    fix_leaves_no_trace("person", arm, act, failing(module("core.edit"), "world_pass"))
+    fix_leaves_no_trace("person", arm, act, failing(module("core.edit"), "replant_feet"))
 
 
 def animal_fix_is_all_or_nothing() -> None:
@@ -141,14 +141,14 @@ def animal_fix_is_all_or_nothing() -> None:
     arm = demo_rig.build_bird()
     act = demo_rig.key_strides(arm, "Walk", together=False)
     creature_fix = module("core.creature_fix")
-    bow_warn = dict(creature_fix.LG.BOW_WARN)
-    creature_fix.LG.BOW_WARN.update(hind=-1.0, fore=-1.0)  # every leg counts as bowed, so the copy is made
-    undo_measure = failing(creature_fix.CR, "measure_clip", on_call=2)  # then judging the copy fails
+    bow_warn = dict(creature_fix.leg_checks.BOW_WARN)
+    creature_fix.leg_checks.BOW_WARN.update(hind=-1.0, fore=-1.0)  # every leg counts as bowed, so the copy is made
+    undo_measure = failing(creature_fix.creature, "measure_clip", on_call=2)  # then judging the copy fails
 
     def undo() -> None:
         undo_measure()
-        creature_fix.LG.BOW_WARN.clear()
-        creature_fix.LG.BOW_WARN.update(bow_warn)
+        creature_fix.leg_checks.BOW_WARN.clear()
+        creature_fix.leg_checks.BOW_WARN.update(bow_warn)
 
     fix_leaves_no_trace("animal", arm, act, undo)
 
@@ -182,4 +182,4 @@ if __name__ == "__main__":
     person_fix_is_all_or_nothing()
     animal_fix_is_all_or_nothing()
     one_loop_rule()
-    print("REVIEW PASSED")
+    print("REGRESSION PASSED")

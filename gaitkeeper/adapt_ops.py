@@ -97,16 +97,7 @@ def adapt_current(
         roles = creature.leg_roles(arm, animal.legs, animal.pelvis)
 
         def judge(a: bpy.types.Action) -> list[str]:
-            return creature.measure_clip(
-                arm,
-                a,
-                animal.legs,
-                animal.pelvis,
-                animal.hopper,
-                animal.rest_widths,
-                scene,
-                settings.every_clip_strikes,
-            )[1]
+            return creature.measure_clip(arm, a, animal, scene, settings.every_clip_strikes)[1]
 
     return adapt.adapt_clip(
         arm,

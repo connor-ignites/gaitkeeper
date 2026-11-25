@@ -73,7 +73,7 @@ def bird_walk(build: Callable[[], bpy.types.Object]) -> tuple[dict, list[str]]:
     creature = importlib.import_module(f"{package}.core.creature")
     scene, view_layer = bpy.context.scene, bpy.context.view_layer
     animal = runner.animal_rig(arm, scene, view_layer)
-    return creature.measure_clip(arm, walk, animal.legs, animal.pelvis, animal.hopper, animal.rest_widths, scene)
+    return creature.measure_clip(arm, walk, animal, scene)
 
 
 if __name__ == "__main__":

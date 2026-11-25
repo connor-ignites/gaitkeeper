@@ -24,8 +24,7 @@ from functools import partial
 import bpy
 from mathutils import Matrix, Quaternion, Vector
 
-from . import adapt_math as am
-from . import motion_math as mm
+from . import adapt_math, motion_math
 from .checks import measure, verdicts
 from .edit import write_action
 from .fix import smooth_pops, two_bone_ik
@@ -74,7 +73,7 @@ def pose_delta(
         l0, q0, _ = original[name]
         dq = Quaternion(q0).inverted() @ Quaternion(q)
         dl = Vector(loc) - Vector(l0)
-        if mm.q_angle_deg((1, 0, 0, 0), tuple(dq)) > min_deg or dl.length > min_move:
+        if motion_math.q_angle_deg((1, 0, 0, 0), tuple(dq)) > min_deg or dl.length > min_move:
             if dq.w < 0:
                 dq.negate()
             out[name] = (dl, dq)
@@ -102,16 +101,16 @@ def mirror_delta(
     """The same change for the twin bone, mirrored across the body's centre line (in the rest pose:
     'swing out' on the left thigh becomes 'swing out' on the right)."""
     n = right.normalized()
-    S = Matrix.Identity(3) - 2 * Matrix(
+    reflect = Matrix.Identity(3) - 2 * Matrix(
         [[n.x * n.x, n.x * n.y, n.x * n.z], [n.y * n.x, n.y * n.y, n.y * n.z], [n.z * n.x, n.z * n.y, n.z * n.z]]
     )
     ra = arm.data.bones[bone].matrix_local.to_3x3().normalized()
     rb = arm.data.bones[twin].matrix_local.to_3x3().normalized()
     d_arm = ra @ dq.to_matrix() @ ra.inverted()
-    dqm = (rb.inverted() @ (S @ d_arm @ S) @ rb).to_quaternion()
+    dqm = (rb.inverted() @ (reflect @ d_arm @ reflect) @ rb).to_quaternion()
     if dqm.w < 0:
         dqm.negate()
-    dlm = rb.inverted() @ (S @ (ra @ dl))
+    dlm = rb.inverted() @ (reflect @ (ra @ dl))
     return dlm, dqm
 
 
@@ -168,7 +167,7 @@ class _Spread:
 
     def at(self, i: int) -> float:
         """Clip frame index i's position on the axis."""
-        return am.position(i, self.n, self.mode, self.cyclic, self.period)
+        return adapt_math.position(i, self.n, self.mode, self.cyclic, self.period)
 
 
 def adapt_clip(
@@ -230,7 +229,7 @@ def _poses_in_clip(
 ) -> tuple[int, dict[int, Pose]]:
     """The clip's first frame and the poses to bake by scene frame (the one on screen wins on its own
     frame). Refuses an unknown spread mode or a pose outside the clip."""
-    if mode not in am.MODES:
+    if mode not in adapt_math.MODES:
         raise ValueError(f"unknown spread mode {mode!r}")
     a, b = clip_range(act)
     poses = dict(more)
@@ -276,7 +275,7 @@ def _travels(report: dict, before: Sample, judge: Callable | None) -> bool:
     """Whether the clip moves the body along (then a loop's feet don't wrap round the seam)."""
     if judge is None:
         return report["original"].get("travels", False)
-    return "hips" in before.world[0] and mm.dist2d(before.world[0]["hips"], before.world[-1]["hips"]) > 0.3
+    return "hips" in before.world[0] and motion_math.dist2d(before.world[0]["hips"], before.world[-1]["hips"]) > 0.3
 
 
 def _step_pattern(
@@ -286,9 +285,9 @@ def _step_pattern(
     left, right = gait_channels(before, roles, arm, m)
     if not (left and right):
         return None, False, False
-    period = am.step_period(left, fps, cyclic)
-    alternate = bool(period) and am.sides_alternate(left, right, period, cyclic)
-    together = not alternate and am.sides_together(left, right, cyclic)
+    period = adapt_math.step_period(left, fps, cyclic)
+    alternate = bool(period) and adapt_math.sides_alternate(left, right, period, cyclic)
+    together = not alternate and adapt_math.sides_together(left, right, cyclic)
     return period, alternate, together
 
 
@@ -329,9 +328,9 @@ def _choose_spread(
     n = len(before.basis)
     period, alternate, together = None, False, False
     if mode == "steps" or mirror:
-        period, alternate, together = _step_pattern(arm, roles, before, fps, cyclic, am.loop_frames(n, cyclic))
+        period, alternate, together = _step_pattern(arm, roles, before, fps, cyclic, adapt_math.loop_frames(n, cyclic))
     use_mode, use_mirror = _spread_mode(mode, mirror, period, alternate, together, notes)
-    length, wraps, radius = am.axis(n, use_mode, cyclic, spread, period)
+    length, wraps, radius = adapt_math.axis(n, use_mode, cyclic, spread, period)
     return _Spread(use_mode, n, cyclic, period, length, wraps, radius, use_mirror, alternate, together)
 
 
@@ -366,7 +365,7 @@ def _gate(
     if sd not in down:
         return None
     state = down.get(src_side or sd, down[sd])[key_idx]
-    g = mm.smooth_weights([1.0 if c == state else 0.0 for c in down[sd]], 2, cyclic)
+    g = motion_math.smooth_weights([1.0 if c == state else 0.0 for c in down[sd]], 2, cyclic)
     top = max(g) if mirrored else g[key_idx]
     return [min(1.0, x / max(top, 1e-6)) for x in g]
 
@@ -416,7 +415,7 @@ def _mirror_track(
 
 def _note_spread(report: dict, sp: _Spread, spread: float, keys: list[Key], track: Track, mirrored: bool) -> None:
     """Say how the change was spread, and the notes that go with it."""
-    report["how"] = am.describe(sp.mode, sp.n, sp.cyclic, spread, sp.period, [k[0] for k in keys], mirrored)
+    report["how"] = adapt_math.describe(sp.mode, sp.n, sp.cyclic, spread, sp.period, [k[0] for k in keys], mirrored)
     if sp.together and sp.mode == "steps":
         report["how"] = report["how"].replace("mirrored on the other foot's step", "both legs together")
     if any(g is not None for t in track.values() for (_, _, g) in t.values()):
@@ -435,7 +434,7 @@ def _blend_frames(before: Sample, sp: _Spread, track: Track) -> list[Pose]:
         fr = dict(before.basis[i])
         x = sp.at(i)
         for bone, spots in plans.items():
-            plan = am.blend_plan(spots, x, sp.length, sp.wraps, sp.radius)
+            plan = adapt_math.blend_plan(spots, x, sp.length, sp.wraps, sp.radius)
             if plan is None:
                 continue
             ka, kb, u, w = plan
@@ -536,7 +535,7 @@ def _pose_kept_deg(arm: bpy.types.Object, scene: bpy.types.Scene, new: bpy.types
         scene.frame_set(ki)
         for bone in d:
             q_now = tuple(arm.pose.bones[bone].matrix_basis.to_quaternion())
-            worst = max(worst, mm.q_angle_deg(q_now, pose[bone][1]))
+            worst = max(worst, motion_math.q_angle_deg(q_now, pose[bone][1]))
     scene.frame_set(keys[0][0])
     return round(worst, 2)
 
@@ -574,7 +573,7 @@ def _keep_feet(
     keeps its original toe angle (unless the foot itself was turned): planted it stays flat, so a bent
     knee doesn't dig the toes in, and swinging it doesn't dangle toes-down.
     Off the ground, a touched foot goes where the new pose puts it, keeping its toe clearance."""
-    ft = _Feet(arm, scene, view_layer, legs, roles, orig_feet, n, am.loop_frames(n, cyclic))
+    ft = _Feet(arm, scene, view_layer, legs, roles, orig_feet, n, adapt_math.loop_frames(n, cyclic))
     floor, plan = _foot_plans(ft, before, fps, cyclic, touched)
     new_pos = _foot_heads(ft, plan)
     targets = {
@@ -595,7 +594,7 @@ def _foot_plans(
         floor[foot] = min(w[f"ankle_{side}"][2] for w in before.world)
         down = contact_flags(before, side, fps, cyclic)[: ft.m]
         own_foot = {ft.roles.get(f"foot_{side}"), ft.roles.get(f"toe_{side}")} & touched
-        plan[foot] = (down, mm.smooth_weights([1.0 if c else 0.0 for c in down], 2, cyclic), not own_foot)
+        plan[foot] = (down, motion_math.smooth_weights([1.0 if c else 0.0 for c in down], 2, cyclic), not own_foot)
     return floor, plan
 
 
@@ -614,7 +613,7 @@ def _lock_planted(down: list[bool], old: list[Vector], new: list[Vector], cyclic
     """The new ankle path, with each planted run following the original path shifted by however far
     the edit moved that step most."""
     locked = list(new)
-    for start, length in mm.runs(down, cyclic):
+    for start, length in motion_math.runs(down, cyclic):
         run = [(start + k) % m for k in range(length)]
         anchor = max(run, key=lambda i: (new[i] - old[i]).length)  # where the edit moved it most
         shift = new[anchor] - old[anchor]
@@ -708,7 +707,7 @@ def _place_legs(ft: _Feet, goal: dict[str, list[tuple[Vector, Matrix]]], lift: d
             if foot in lift and lift[foot][f] > 0:
                 target = target + Vector((0, 0, lift[foot][f]))
             off = (fb.head - target).length
-            turn = mm.q_angle_deg(tuple(fb.matrix.to_quaternion()), tuple(rot.to_quaternion()))
+            turn = motion_math.q_angle_deg(tuple(fb.matrix.to_quaternion()), tuple(rot.to_quaternion()))
             if off < 5e-4 and turn < 0.1:
                 continue
             two_bone_ik(ft.arm, pb[thigh], pb[calf], fb, target, rot, ft.view_layer)

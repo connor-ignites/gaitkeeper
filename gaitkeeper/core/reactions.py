@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """How the loose parts of a hopping (or running) body react: head, arms, tail. No Blender here.
 
-Two ways it goes wrong, both seen in review of a kangaroo hop:
-- locked: the head, arms and tail ride along on the body as if bolted on ("the arms locked pose,
-  the head and neck stiffness on jumps, none of it reacts with each other");
-- floppy: they swing on loose springs and wobble back and forth ("now it just flops about").
+Two ways it goes wrong, both seen in kangaroo hop animations:
+- locked: the head, arms and tail ride along on the body as if bolted on, the arms held in one pose
+  and the head and neck stiff through the jumps, nothing reacting to anything else;
+- floppy: they swing on loose springs and wobble back and forth.
 
-What the reference footage shows (red and grey kangaroos, side and front on, 8 Nov 2026):
+What reference footage shows (red and grey kangaroos, side and front on):
 - the head keeps its gaze: its pitch in the world stays within a few degrees while the body bounces,
   with one small nod as the feet land;
 - the forearms stay tucked at the chest and move a little with each landing, one way and back;
@@ -234,9 +234,9 @@ def strike_verdicts(speeds: Sequence[float], name: str = "the strike") -> list[s
 # ---------- harsh corners: a fast hand or foot that turns sharply between two frames ----------
 
 ARC_CORNER_DEG = 60.0  # a fast-moving foot or hand may not change direction by more than this in one frame
-# Calibrated 8 Nov 2026: at 24-30 fps a toe peeling off the ground, a foot landing or a launch from a
-# held coil turns 60-175 deg in one frame at 1.5-6 m/s in clips that passed review (kangaroo Hop, Run,
-# HopSlow) and in good Quaternius UAL clips (Jog, Sprint, Jump_Start, Roll at up to 8.7 m/s). Only
+# Calibration: at 24-30 fps a toe peeling off the ground, a foot landing or a launch from a held coil
+# turns 60-175 deg in one frame at 1.5-6 m/s in kangaroo hops and runs that read as natural, and in
+# good Quaternius UAL clips (Jog, Sprint, Jump_Start, Roll at up to 8.7 m/s). Only
 # faster than that does a corner mean a broken, key-to-key path: the UAL Sword_Attack hand turns
 # 61-72 deg a frame at 14-24 m/s (about a metre a frame: a polygon, not an arc).
 ARC_MIN_SPEED = 9.0  # m/s on both sides of the frame
@@ -272,11 +272,10 @@ def arc_verdicts(corners: Sequence[int], name: str) -> list[str]:
 
 
 # ---------- the striking foot of a hopper's kick ----------
-# Review note on a tail kick: "the feet are still angled down wrong". Attempt 4 curled the
-# toes 22 degrees down so "the claws lead". The footage says otherwise (measured 8 Nov 2026 on
-# gridded close-ups): at the hit the long foot carries on the line of the shin or tips UP from it,
-# about +21 deg in the BBC boxing pair (m05, frame 20) and about +11 deg in the jump kick (m17,
-# frame 11), the toes stay straight along the foot, and the sole and claw tips push through the
+# A common mistake is to tip the foot down and curl the toes so the claws lead. Footage of real
+# kicks, measured on gridded close-ups, says otherwise: at the hit the long foot carries on the line
+# of the shin or tips UP from it, about +21 deg in a pair of boxing kangaroos and about +11 deg in a
+# jump kick, the toes stay straight along the foot, and the sole and claw tips push through the
 # target. Only a foot that is NOT striking hangs with its toes pointing down.
 # Angles are signed in the leg's own plane: + closes the ankle the way it is closed when standing
 # (the foot tips up from the shin line in a kick), - opens it past straight (tips down).
@@ -345,20 +344,20 @@ def strike_foot_verdicts(
     return out
 
 
-# ---------- spacing and overlap (8 Nov 2026, from animation-polish videos) ----------
-# AnimMonks (timing, spacing and arcs): equal spacing between keys reads mechanical; a move eases
-# out of one pose and into the next. Aaron Blaise (four tips for weight): weight comes from contrast,
-# fast then slow, never one steady rate. New Frame Plus (follow-through and overlapping action): a
-# body that moves and stops all at once looks stiff; motion ripples out from the core, the
-# shoulders a frame or two behind the torso, the hands a frame behind that, the loose bits last.
+# ---------- spacing and overlap (from the principles of animation) ----------
+# Timing, spacing and arcs: equal spacing between keys reads mechanical; a move eases out of one pose
+# and into the next. Weight: it comes from contrast, fast then slow, never one steady rate.
+# Follow-through and overlapping action: a body that moves and stops all at once looks stiff; motion
+# ripples out from the core, the shoulders a frame or two behind the torso, the hands a frame behind
+# that, the loose bits last.
 
 LINEAR_MIN_SPEED = 0.3  # m/s: slower parts are drifting, not moving between poses
 LINEAR_DV = 0.02  # velocity may change by under 2% of the speed per frame to count as linear
 LINEAR_RUN_S = 0.25  # this long at a perfectly steady velocity reads as a computer in-between
 GROUND_TOL = 0.03  # m: a part within this of its lowest point counts as planted on the floor
-# Calibrated 8 Nov 2026: no run of even 4 frames in the 42 good Quaternius UAL clips (every bone end,
-# relative to the hips), the reviewed kangaroo Hop, Run and kick attempt 5. A known-bad
-# kangaroo Walk: both hands glide at one steady velocity for 9 frames (0.3 s).
+# Calibration: no run of even 4 frames in the 42 good Quaternius UAL clips (every bone end, relative
+# to the hips) or in kangaroo hops, runs and kicks that read as natural. A known-bad kangaroo walk:
+# both hands glide at one steady velocity for 9 frames (0.3 s).
 
 
 def linear_run(
@@ -367,7 +366,7 @@ def linear_run(
     """(frames, first frame) of the longest stretch where a part moves at one steady velocity
     (same speed and direction, faster than LINEAR_MIN_SPEED): linear spacing. `grounded` marks frames
     where the part is planted on the floor: a planted foot in an in-place clip slides back at the
-    steady game speed by design, so those frames never count (Border Collie crouch walks)."""
+    steady game speed by design, so those frames never count (a dog's crouch walk, for one)."""
     v = [[(points[i + 1][j] - points[i][j]) * fps for j in range(3)] for i in range(len(points) - 1)]
     best, start, run = 0, 0, 0
     for i in range(1, len(v)):
@@ -399,7 +398,7 @@ def linear_verdicts(runs: dict[str, tuple[int, int]], fps: float) -> list[str]:
 
 OVERLAP_MIN_BOB = 0.005  # m: the hips must bob at least this much for overlap to show
 OVERLAP_LOCK_CORR = 0.95  # a part following the hips this closely with no lag rides along locked
-# Calibrated 8 Nov 2026 on the Quaternius UAL idles: the head trails the hips' bob by 2-6 frames
+# Calibrated on the Quaternius UAL idles: the head trails the hips' bob by 2-6 frames
 # (Idle 2, Torch 3, Talking 4, Spell 5, Crouch 6). In walks, jogs and sprints the head follows with
 # no lag (the torso is stiff up and down), so this is judged on idles only.
 
@@ -433,7 +432,7 @@ def block_verdicts(hips_z: Sequence[float], parts_z: dict[str, Sequence[float]],
 # ---------- the root bone's path (GDC 2015, Just Cause 3: responsive high-fidelity movement) ----------
 # The game moves the character's capsule along the root bone. The root should travel in a smooth
 # line; the body may sway around it, but if the root copies the hips' side-to-side sway with every
-# step, the capsule (and the camera on it) wobbles. Calibrated 8 Nov 2026 on the Quaternius UAL
+# step, the capsule (and the camera on it) wobbles. Calibrated on the Quaternius UAL
 # root-motion clips: the root sways 0.0 cm in all ten travelling clips while the hips sway 0.3-3.7 cm.
 
 ROOT_SWAY_MAX_CM = 1.0
@@ -464,8 +463,8 @@ def root_sway_verdicts(root_cm: float, hips_cm: float) -> list[str]:
     return []
 
 
-# ---------- hang time: fast out of the take-off, slow over the top (8 Nov 2026) ----------
-# Aaron Blaise (four tips for weight): weight reads from timing contrast. A thrown body leaves the
+# ---------- hang time: fast out of the take-off, slow over the top ----------
+# Weight reads from timing contrast. A thrown body leaves the
 # ground fast and slows into the top of its arc, hangs there, then speeds up again on the way down.
 # A real arc (a parabola) spends about half its flight in the top quarter of its height; a body
 # moved up and down at one steady speed (a straight in-between, the "triangle" arc) spends only a
@@ -473,9 +472,9 @@ def root_sway_verdicts(root_cm: float, hips_cm: float) -> list[str]:
 
 HANG_TOP = 0.25  # the top quarter of the rise
 HANG_MIN_SHARE = 0.28  # a parabola gives 0.44-0.5 even with a lower landing; a steady-speed arc 0.25
-# Calibrated 8 Nov 2026: the kangaroo hops that passed review (Hop, Run, HopSlow attempt 4) spend 0.40-0.50
-# of each flight near the top; known-bad kangaroo Hop and Run 0.33-0.36; Kelpie_Hop 0.30
-# (falling at 9.6 m/s2, so a real arc cut into few frames) and Kelpie_JumpAttack 0.50.
+# Calibrated on three kangaroo hops and runs that read as natural (0.40-0.50 of each flight near the
+# top) and two that read as weightless (0.33-0.36); a kelpie's hop gives 0.30 (falling at 9.6 m/s2, so a
+# real arc cut into few frames) and its jump attack 0.50.
 HANG_MIN_RISE = 0.08  # m: smaller hops are too small to judge
 HANG_MIN_FRAMES = 8
 
@@ -504,7 +503,7 @@ def hang_verdicts(shares: Sequence[float]) -> list[str]:
     ]
 
 
-# ---------- follow-through after a hit (New Frame Plus: follow-through and overlapping action) ----------
+# ---------- follow-through after a hit (the principle of follow-through and overlapping action) ----------
 # A strike where everything stops the moment it lands reads as robotic: the body carries on past the
 # hit and settles over a few frames, the core and the loose parts last. A fighting game may hold the
 # fist at full stretch for a few frames on purpose (the Quaternius punches and sword swing do, and
@@ -537,9 +536,9 @@ def follow_through_s(speeds: Sequence[float], fps: float, end: int | None = None
     return None
 
 
-# Calibrated 8 Nov 2026 on leg strikes: the tail kick that passed review (attempt 5) keeps the body moving
-# 0.47 s after the hit; attempt 1 ("needs more coil and snap") and two known-bad kicks (GrappleKick
-# and JumpKick) stop limb and body within 67 ms. People are measured but not judged: the Quaternius
+# Calibrated on leg strikes: a kangaroo tail kick that reads as natural keeps the body moving 0.47 s
+# after the hit; a version lacking coil and snap and two known-bad kicks (a grapple kick and a jump
+# kick) stop limb and body within 67 ms. People are measured but not judged: the Quaternius
 # punches and sword swing stop the fist and chest together at full stretch (a fighting-game hold),
 # and they are the clean baseline.
 
@@ -631,13 +630,13 @@ def lean_verdicts(m: dict, turning: bool) -> list[str]:
     return out
 
 
-# ---------- an animal's strikes with its arms, claws or jaws (0.8) ----------
-# Learned 10 Nov 2026 from a punch-biomechanics video (hips turn, pull the shoulders, then the arm
-# pops), a fighting-game director's attack breakdown (snap to the wind-up pose is fine for a player
-# move; the pose at the hit must be crisp; the recovery uses its time) and frame-by-frame wolf bites
-# from an open-world game (the front legs brake and the head drops first, the mouth opens before
-# contact, the body brings the head, then it pulls back with its weight). Calibrated on the Border
-# Collie pack's bites (good) and a kangaroo and kelpie with known faults.
+# ---------- an animal's strikes with its arms, claws or jaws ----------
+# From punch biomechanics (hips turn, pull the shoulders, then the arm pops), a fighting-game
+# director's attack breakdown (snap to the wind-up pose is fine for a player move; the pose at the hit
+# must be crisp; the recovery uses its time) and frame-by-frame wolf bites from an open-world game (the
+# front legs brake and the head drops first, the mouth opens before contact, the body brings the head,
+# then it pulls back with its weight). Calibrated on a commercial dog pack's bites (good) and a
+# kangaroo and kelpie with known faults.
 
 UPPER_STRIKE = ("punch", "jab", "swipe", "claw", "slash", "maul", "box", "bite", "attack", "headbutt", "snap")
 NOT_A_STRIKE = ("hit", "scratch", "react", "death", "die", "dead", "hurt", "stagger")

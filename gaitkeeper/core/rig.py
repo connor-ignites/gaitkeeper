@@ -11,7 +11,7 @@ from collections.abc import Sequence
 import bpy
 from mathutils import Euler, Matrix, Quaternion, Vector
 
-from . import motion_math as mm
+from . import motion_math
 
 ROLES: dict[str, list[str]] = {
     "hips": ["pelvis", "hips", "mixamorig:hips", "hip", "root.x"],
@@ -162,6 +162,8 @@ def set_action(arm: bpy.types.Object, act: bpy.types.Action) -> None:
 
 
 ROTATION_PATHS = {"QUATERNION": "rotation_quaternion", "AXIS_ANGLE": "rotation_axis_angle"}
+# every transform channel of an object or pose bone, whatever its rotation mode
+TRANSFORMS = ("location", "rotation_quaternion", "rotation_euler", "rotation_axis_angle", "scale")
 
 
 def rotation_path(pb: bpy.types.PoseBone) -> str:
@@ -269,7 +271,7 @@ def held_root(arm: bpy.types.Object, hips: str | None) -> tuple[str, Matrix] | N
 
 def rest_space(arm: bpy.types.Object, hips: str | None) -> Matrix:
     """The matrix that takes armature-space rest data (head_local, matrix_local) to world space as the clip
-    shows the body: usually the object's world matrix. Some packs (Kevin Iglesias, exported from Unity) keep a
+    shows the body: usually the object's world matrix. Some packs exported from Unity keep a
     top bone above the hips whose pose never changes but stands the body up and scales it 100 times: the rest
     pose lies on its back while every frame stands up. That held pose is folded in here, in memory only, so
     forward, left and right, limb directions and sizes read from the rest pose match the frames. The rig, its
@@ -405,30 +407,6 @@ def sample(arm: bpy.types.Object, act: bpy.types.Action, roles: dict[str, str], 
     return s
 
 
-def interp_basis(frames: list[dict], t: float) -> dict:
-    i = math.floor(t)
-    i = max(0, min(i, len(frames) - 1))
-    j = min(i + 1, len(frames) - 1)
-    u = t - i
-    if u < 1e-6 or i == j:
-        return frames[i]
-    out = {}
-    for name, (la, qa, sa) in frames[i].items():
-        lb, qb, sb = frames[j][name]
-        out[name] = (
-            tuple(x + (y - x) * u for x, y in zip(la, lb)),
-            mm.q_slerp(qa, qb, u),
-            tuple(x + (y - x) * u for x, y in zip(sa, sb)),
-        )
-    return out
-
-
-def interp_list(vals: list[float], t: float) -> float:
-    i = max(0, min(math.floor(t), len(vals) - 1))
-    j = min(i + 1, len(vals) - 1)
-    return vals[i] + (vals[j] - vals[i]) * (t - i)
-
-
 def body_axes(arm: bpy.types.Object, roles: dict[str, str]) -> tuple[Vector, Vector, Vector]:
     """(forward, right, up) in world space, from the rest pose (as rest_space reads it): feet point forward."""
     mw = rest_space(arm, roles.get("hips")).to_3x3()
@@ -458,4 +436,4 @@ def contact_flags(s: Sample, side: str, fps: float, cyclic: bool) -> list[bool]:
         k = i if j != i else max(0, i - 1)
         a, b = pos[k], pos[j if j != i else i]
         sp.append(abs(b[2] - a[2]) * fps)
-    return mm.drop_sweeps(pos, mm.contacts(h, sp, min(h)), fps, cyclic)
+    return motion_math.drop_sweeps(pos, motion_math.contacts(h, sp, min(h)), fps, cyclic)
