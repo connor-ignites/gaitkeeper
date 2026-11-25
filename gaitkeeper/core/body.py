@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from . import body_rules as br
@@ -131,6 +132,29 @@ def _first(s: Any, *keys: str) -> list[tuple] | None:
     return None
 
 
+Issue = tuple[str, float, str]  # (key, size, message): bigger size = worse
+SIDE_WORD = {"l": "left", "r": "right"}
+
+
+@dataclass(frozen=True)
+class _Clip:
+    """One clip as the body measurements read it."""
+
+    s: Any
+    fps: float
+    roles: dict[str, str]
+    flags: dict[str, list[bool]]
+    name: str
+    travels: bool
+    feet_off_ground: bool
+    cyclic: bool
+    standing_still: bool
+
+    @property
+    def n(self) -> int:
+        return len(self.s.world)
+
+
 def measure_body(
     s: Any,
     fps: float,
@@ -143,326 +167,491 @@ def measure_body(
     cyclic: bool,
     standing_still: bool = False,
 ) -> dict:
-    n = len(s.world)
-    out: dict = {}
-    # ---- hinge joints ----
-    for side in "lr":
-        hip, knee, ankle = (_pts(s, f"pt:{r}_{side}") for r in ("thigh", "calf", "foot"))
-        thigh = roles.get(f"thigh_{side}")
-        if hip and knee and ankle and thigh:
-            # the knee's hinge axis, from the rest pose: the shin folds back, away from where the feet point
-            ref = None
-            fwd = getattr(s, "rest_fwd", None)
-            if fwd and thigh in s.rest_q:
-                axis = br.cross(s.rest_axis[thigh], br.scale(fwd, -1.0))
-                ref = br.q_rotate(br.q_inv(s.rest_q[thigh]), br.unit(axis))
-            out[f"knee_{side}"] = br.hinge(hip, knee, ankle, [q[thigh] for q in s.world_q], ref_local=ref)
-        sh, el = _pts(s, f"pt:upperarm_{side}"), _pts(s, f"pt:lowerarm_{side}")
-        wr = _first(s, f"pt:hand_{side}", f"tip:lowerarm_{side}")
-        ua = roles.get(f"upperarm_{side}")
-        if sh and el and wr and ua:
-            out[f"elbow_{side}"] = br.hinge(
-                sh,
-                el,
-                wr,
-                [q[ua] for q in s.world_q],
-                backward_limit=br.ELBOW_BACKWARD_FAIL,
-                sideways_limit=br.ELBOW_SIDEWAYS_WARN,
-            )
-    # ---- neck, spine, wrists: turns against the parent, compared with the rest pose ----
+    """Every body measurement of one clip: joints, balance, gait, spacing and attacks (the rules are in BODY.md)."""
+    c = _Clip(s, fps, roles, flags, name, travels, feet_off_ground, cyclic, standing_still)
     chest = next((roles[r] for r in ("spine3", "spine2", "spine1") if r in roles), None)
+    out: dict = _hinge_joints(s, roles)
+    out.update(_joint_turns(s, roles, chest))
+    hip_ext = _hip_extension(c)
+    if hip_ext is not None:
+        out["hip_extension_deg"] = hip_ext
+    com = [mm.com([(w["com:" + nm], ln) for nm, ln in lengths.items() if "com:" + nm in w]) for w in s.world]
+    out.update(_feet_on_ground(c, com))
+    hl, hr = _pts(s, "pt:thigh_l"), _pts(s, "pt:thigh_r")
+    if _has(name, GAIT) and hl and hr:
+        out.update(_gait(s, hl, hr))
+    hp = _pts(s, "pt:hips") or _pts(s, "hips")
+    if hp:
+        out.update(_spacing(c, hp, hl, hr))
+    if _has(name, ATTACK):
+        strike = _strike(c, chest)
+        if strike:
+            out["strike"] = strike
+    return out
 
-    def turn(parent: str | None, child: str | None) -> dict | None:
-        if not parent or not child or child not in s.rest_q:
-            return None
-        bend = twist = 0.0
-        for q in s.world_q:
-            b, t = br.relative_turn(s.rest_q[parent], s.rest_q[child], q[parent], q[child], s.rest_axis[child])
-            bend, twist = max(bend, b), max(twist, t)
-        return {"bend_deg": round(bend, 1), "twist_deg": round(twist, 1)}
 
+# ---------- joints ----------
+
+
+def _knee(s: Any, roles: dict[str, str], side: str) -> dict | None:
+    """The knee as a hinge, its axis from the rest pose: the shin folds back, away from where the feet point."""
+    hip, knee, ankle = (_pts(s, f"pt:{r}_{side}") for r in ("thigh", "calf", "foot"))
+    thigh = roles.get(f"thigh_{side}")
+    if not (hip and knee and ankle and thigh):
+        return None
+    ref = None
+    fwd = getattr(s, "rest_fwd", None)
+    if fwd and thigh in s.rest_q:
+        axis = br.cross(s.rest_axis[thigh], br.scale(fwd, -1.0))
+        ref = br.q_rotate(br.q_inv(s.rest_q[thigh]), br.unit(axis))
+    return br.hinge(hip, knee, ankle, [q[thigh] for q in s.world_q], ref_local=ref)
+
+
+def _elbow(s: Any, roles: dict[str, str], side: str) -> dict | None:
+    """The elbow as a hinge, about the axis the clip mostly bends it."""
+    sh, el = _pts(s, f"pt:upperarm_{side}"), _pts(s, f"pt:lowerarm_{side}")
+    wr = _first(s, f"pt:hand_{side}", f"tip:lowerarm_{side}")
+    ua = roles.get(f"upperarm_{side}")
+    if not (sh and el and wr and ua):
+        return None
+    return br.hinge(
+        sh,
+        el,
+        wr,
+        [q[ua] for q in s.world_q],
+        backward_limit=br.ELBOW_BACKWARD_FAIL,
+        sideways_limit=br.ELBOW_SIDEWAYS_WARN,
+    )
+
+
+def _hinge_joints(s: Any, roles: dict[str, str]) -> dict:
+    """Knees and elbows, side by side."""
+    out: dict = {}
+    for side in "lr":
+        knee = _knee(s, roles, side)
+        if knee is not None:
+            out[f"knee_{side}"] = knee
+        elbow = _elbow(s, roles, side)
+        if elbow is not None:
+            out[f"elbow_{side}"] = elbow
+    return out
+
+
+def _relative_turn(s: Any, parent: str | None, child: str | None) -> dict | None:
+    """The most a bone bends and twists against its parent over the clip, compared with the rest pose."""
+    if not parent or not child or child not in s.rest_q:
+        return None
+    bend = twist = 0.0
+    for q in s.world_q:
+        b, t = br.relative_turn(s.rest_q[parent], s.rest_q[child], q[parent], q[child], s.rest_axis[child])
+        bend, twist = max(bend, b), max(twist, t)
+    return {"bend_deg": round(bend, 1), "twist_deg": round(twist, 1)}
+
+
+def _joint_turns(s: Any, roles: dict[str, str], chest: str | None) -> dict:
+    """Neck, spine and wrists: turns against the parent, compared with the rest pose."""
+    out: dict = {}
     for key, parent, child in (
         ("neck", chest, roles.get("head")),
         ("spine", roles.get("hips"), chest),
         ("wrist_l", roles.get("lowerarm_l"), roles.get("hand_l")),
         ("wrist_r", roles.get("lowerarm_r"), roles.get("hand_r")),
     ):
-        t = turn(parent, child)
+        t = _relative_turn(s, parent, child)
         if t:
             out[key] = t
-    # ---- hip extension (thigh behind the pelvis) ----
+    return out
+
+
+def _hip_extension(c: _Clip) -> float | None:
+    """The furthest a thigh swings behind the pelvis, in degrees (None without a pelvis and rest pose)."""
+    s, roles = c.s, c.roles
     pelvis_b = roles.get("hips")
-    hl, hr = _pts(s, "pt:thigh_l"), _pts(s, "pt:thigh_r")
     fwd = getattr(s, "rest_fwd", None)
-    if pelvis_b and fwd and pelvis_b in s.rest_q:
-        worst = 0.0
-        inv_rest = br.q_inv(s.rest_q[pelvis_b])
-        f0 = br.q_rotate(inv_rest, fwd)
-        for side in "lr":
-            thigh, hip, knee = roles.get(f"thigh_{side}"), _pts(s, f"pt:thigh_{side}"), _pts(s, f"pt:calf_{side}")
-            if not thigh or not hip or not knee or thigh not in s.rest_axis:
-                continue
-            # neutral is straight down at rest, not the rest thigh: some files rest mid-stride (Starter Assets:
-            # one thigh 21 degrees back, the other 29 forward), which read as a 180-degree swing
-            d0 = br.q_rotate(inv_rest, (0.0, 0.0, -1.0))
-            for i in range(n):
-                d = br.q_rotate(br.q_inv(s.world_q[i][pelvis_b]), br.sub(knee[i], hip[i]))
-                worst = max(worst, br.hip_extension_deg(d0, f0, d))
-        out["hip_extension_deg"] = round(worst, 1)
-    # ---- centre of mass ----
-    com = [mm.com([(w["com:" + nm], ln) for nm, ln in lengths.items() if "com:" + nm in w]) for w in s.world]
-    # ---- feet on the ground ----
+    if not (pelvis_b and fwd and pelvis_b in s.rest_q):
+        return None
+    worst = 0.0
+    inv_rest = br.q_inv(s.rest_q[pelvis_b])
+    f0 = br.q_rotate(inv_rest, fwd)
+    for side in "lr":
+        thigh, hip, knee = roles.get(f"thigh_{side}"), _pts(s, f"pt:thigh_{side}"), _pts(s, f"pt:calf_{side}")
+        if not thigh or not hip or not knee or thigh not in s.rest_axis:
+            continue
+        # neutral is straight down at rest, not the rest thigh: some files rest mid-stride (Starter Assets:
+        # one thigh 21 degrees back, the other 29 forward), which read as a 180-degree swing
+        d0 = br.q_rotate(inv_rest, (0.0, 0.0, -1.0))
+        for i in range(c.n):
+            d = br.q_rotate(br.q_inv(s.world_q[i][pelvis_b]), br.sub(knee[i], hip[i]))
+            worst = max(worst, br.hip_extension_deg(d0, f0, d))
+    return round(worst, 1)
+
+
+# ---------- feet on the ground ----------
+
+
+def _sole_heights(s: Any) -> dict[str, list[float]]:
+    """Per side, the lowest of the ball (or ankle) and toe on each frame."""
     sole = {}
     for side in "lr":
         k = f"ball_{side}" if f"ball_{side}" in s.world[0] else f"ankle_{side}"
         if k in s.world[0]:
             sole[side] = [min(w.get(f"toe_{side}", w[k])[2], w[k][2]) for w in s.world]
-    if len(sole) == 2 and len(flags) == 2:
-        ground = min(min(v) for v in sole.values())
-        air = [
-            not flags["l"][i] and not flags["r"][i] and sole["l"][i] > ground + 0.05 and sole["r"][i] > ground + 0.05
-            for i in range(n)
-        ]
-        out["airborne_frames"] = sum(air)
-        runs = br.true_runs(air)
-        out["longest_airborne"] = max((ln for _, ln in runs), default=0)
-        falls, hangs = [], []
-        for st, ln in runs:
-            # only whole flights: one cut off by the clip's start or end isn't a full arc
-            if ln >= 6 and not feet_off_ground and st > 0 and st + ln < n:
-                zs = [com[i][2] for i in range(st, st + ln)]
-                top = zs.index(max(zs))
-                # a real arc: rises then falls, with the top well inside the flight
-                if 2 <= top <= ln - 3 and max(zs) - zs[0] > 0.02 and max(zs) - zs[-1] > 0.02:
-                    falls.append(round(-br.fall_acceleration(zs, fps), 2))
-                    h = R.hang_share(zs)
-                    if h is not None:
-                        hangs.append(h)
-        out["air_gravity_m_s2"] = falls
-        out["hang_share"] = hangs
-        # steps a minute
-        steps = sum(len(mm.runs(flags[sd], cyclic)) for sd in "lr")
-        secs = (n - 1) / fps if n > 1 else 1.0
-        out["steps_per_min"] = round(steps / secs * 60, 1) if secs > 0 else 0.0
-        # COM sudden changes of speed while a foot is down
-        acc = br.accel_series(com, fps, span=3)
-        grounded = [a for i, a in enumerate(acc, start=3) if flags["l"][i] or flags["r"][i]]
-        out["com_accel_max_m_s2"] = round(max(grounded), 1) if grounded else 0.0
-        # standing on one foot: is the weight over it?
-        if standing_still and not _has(name, AIR_OK + GAIT + ATTACK + SUPPORTED):
-            # static balance only: a moving body falls into its next step on purpose
-            worst, worst_side = 0.0, ""
-            for i in range(n):
-                down = [sd for sd in "lr" if flags[sd][i]]
-                if len(down) != 1:
-                    continue
-                j = min(i + 1, n - 1)
-                if i == j or br.length(br.sub(com[j], com[i])) * fps > 0.25:
-                    continue
-                sd = down[0]
-                pts = [s.world[i][k] for k in (f"ankle_{sd}", f"ball_{sd}", f"toe_{sd}") if k in s.world[i]]
-                if pts:
-                    d = mm.outside_support(com[i], pts)
-                    if d > worst:
-                        worst, worst_side = d, sd
-            out["one_foot_off_balance_m"] = round(worst, 3)
-            out["one_foot_side"] = worst_side
-    # ---- gait: arms against legs, chest against hips ----
-    if _has(name, GAIT) and hl and hr:
-        al, ar = _pts(s, "ankle_l"), _pts(s, "ankle_r")
-        wl = _first(s, "pt:hand_l", "tip:lowerarm_l")
-        wr2 = _first(s, "pt:hand_r", "tip:lowerarm_r")
-        fwd = [br.unit(br.cross(br.UP, br.flat(br.sub(hr[i], hl[i])))) for i in range(n)]
-        if al and ar and wl and wr2:
-            leg = [br.dot(br.sub(al[i], ar[i]), fwd[i]) for i in range(n)]
-            arm = [br.dot(br.sub(wl[i], wr2[i]), fwd[i]) for i in range(n)]
-            out["arm_leg_corr"] = round(br.correlation(arm, leg), 2)
-            out["arm_swing_m"] = round(br.spread(arm), 3)
-            out["leg_swing_m"] = round(br.spread(leg), 3)
-        sl, sr = _pts(s, "pt:upperarm_l"), _pts(s, "pt:upperarm_r")
-        if sl and sr:
+    return sole
 
-            def yaw(a: list[tuple], b: list[tuple]) -> list[float]:
-                ys = [math.degrees(math.atan2(b[i][1] - a[i][1], b[i][0] - a[i][0])) for i in range(n)]
-                return [(y - ys[0] + 180) % 360 - 180 for y in ys]
 
-            py, cy = yaw(hl, hr), yaw(sl, sr)
-            out["chest_hip_corr"] = round(br.correlation(cy, py), 2)
-            out["hip_turn_deg"] = round(br.spread(py), 1)
-            out["chest_turn_deg"] = round(br.spread(cy), 1)
-    # ---- spacing: a part gliding at one steady velocity (linear in-betweens) ----
-    hp = _pts(s, "pt:hips") or _pts(s, "hips")
-    if hp:
-        runs: dict[str, tuple[int, int]] = {}
-        floor_z = min(
-            (q[2] for k in ("toe_l", "toe_r", "ankle_l", "ankle_r") for q in (_pts(s, k) or [])),
-            default=min(q[2] for q in hp) - 1.0,
-        )
-        for key, label in (
-            ("tip:hand_l", "left hand"),
-            ("tip:hand_r", "right hand"),
-            ("tip:head", "head"),
-            ("toe_l", "left foot"),
-            ("toe_r", "right foot"),
-        ):
-            p = _pts(s, key)
-            if p:
-                rel = [br.sub(p[i], hp[i]) for i in range(n)]
-                r = R.linear_run(rel, fps, [q[2] < floor_z + R.GROUND_TOL for q in p])
-                if r[0]:
-                    runs[label] = r
-        # the hips against the root bone: a travelling clip moves the whole body at the game speed
-        rb = _pts(s, "rootbone")
-        r = R.linear_run([br.sub(hp[i], rb[i]) for i in range(n)] if rb and rb[0] != hp[0] else hp, fps)
-        if r[0]:
-            runs["hips"] = r
-        out["linear_runs"] = runs
-        # ---- leaning sideways in a walk or run (clamped, or it looks drunk) ----
-        top = _first(s, "pt:neck", "pt:head")
-        if _has(name, GAIT) and top and hl and hr:
-            turning = any(w in TURN_WORDS for w in words_of(name))
-            rb = _pts(s, "rootbone")
-            path = rb if rb and rb[0] != hp[0] and travels else (hp if travels else None)
-            if path is not None or not turning:
-                need = R.turn_lean_deg(path, fps) if path is not None else None
-                out["lean"] = R.lean_measure(R.side_lean_deg(hp, top, hl, hr), need)
-                out["lean"]["turning"] = turning
-        # ---- overlap: in an idle, the head and hands trail the hips' bob ----
-        if cyclic and "idle" in name.lower() and not _has(name, ("sit", "driv", "lying", "sleep")):
-            m = n - 1 if n > 2 else n  # a loop's last frame repeats the first
-            parts = {
-                lab: [p[i][2] for i in range(m)]
-                for lab, key in (("head", "pt:head"), ("hands", "pt:hand_l"))
-                if (p := _pts(s, key))
-            }
-            out["block_bob"] = R.block_verdicts([hp[i][2] for i in range(m)], parts, fps)
-    # ---- attacks: anticipation, hit, recovery, wind-up, kinetic chain ----
-    if _has(name, ATTACK):
-        best: dict = {}
-        best_key = ""
-        for key in ("tip:hand_l", "tip:hand_r", "tip:lowerarm_l", "tip:lowerarm_r", "toe_l", "toe_r"):
-            p = _pts(s, key)
-            if p is None:
-                continue
-            st = br.strike(p, fps)
-            if st and st["peak_speed_m_s"] > best.get("peak_speed_m_s", 0):
-                best, best_key = st, key
-        if best:
-            best["effector"] = best_key.split(":")[-1]
-            best["path_corners"] = R.path_corners(_pts(s, best_key) or [], fps)
-            keys = [
-                k
-                for k in ("hips", "pt:spine3", "pt:head", "tip:hand_l", "tip:hand_r", "toe_l", "toe_r")
-                if k in s.world[0]
-            ]
-            tell = R.tell_s(br.speeds(_pts(s, best_key) or [], fps), fps, [[w[k] for k in keys] for w in s.world])
-            best["tell_s"] = None if tell is None else round(tell, 3)
-            # A draw-back is against the body (the path relative to the hips), as for animals: when the
-            # fastest burst is a wind-up and the strike is a later burst going the other way, note both.
-            hp, ep = _pts(s, "hips"), _pts(s, best_key)
-            if hp and ep:
-                split = R.split_windup([tuple(p - q for p, q in zip(e, h)) for e, h in zip(ep, hp)], fps)
-                if split:
-                    best["windup_split"] = split
-            out["strike"] = best
-            if chest:
-                q0 = s.world_q[0][chest]
-                best["chest_turn_deg"] = round(max(mm.q_angle_deg(q0, q[chest]) for q in s.world_q), 1)
-            side = best_key[-1]
-            chain = [
-                roles.get(r)
-                for r in ("hips", "spine3" if "spine3" in roles else "spine2", f"upperarm_{side}", f"lowerarm_{side}")
-            ]
-            if all(chain) and ("hand" in best_key or "lowerarm" in best_key):
-                peaks = []
-                for b in chain:
-                    if b is None:
-                        continue
-                    ang = [mm.q_angle_deg(s.world_q[i][b], s.world_q[i + 1][b]) for i in range(n - 1)]
-                    peaks.append(br.peak_frame(ang))
-                hand_sp = br.speeds(_pts(s, best_key) or [], fps)
-                best["chain_peaks"] = [*peaks, br.peak_frame(hand_sp)]
-            lsp = br.speeds(_pts(s, best_key) or [], fps)
-            best["follow_through_s"] = R.follow_through_s(lsp, fps)
-            core = _first(s, "pt:spine3", "pt:spine2", "pt:neck", "pt:hips")
-            if core and lsp:
-                best["body_follow_s"] = R.follow_through_s(br.speeds(core, fps), fps, R.hit_end(lsp))
+def _feet_on_ground(c: _Clip, com: list[tuple]) -> dict:
+    """Flight, steps a minute, sudden changes of speed, and balance on one foot."""
+    sole = _sole_heights(c.s)
+    flags, n = c.flags, c.n
+    if len(sole) != 2 or len(flags) != 2:
+        return {}
+    ground = min(min(v) for v in sole.values())
+    air = [
+        not flags["l"][i] and not flags["r"][i] and sole["l"][i] > ground + 0.05 and sole["r"][i] > ground + 0.05
+        for i in range(n)
+    ]
+    out: dict = {"airborne_frames": sum(air)}
+    runs = br.true_runs(air)
+    out["longest_airborne"] = max((ln for _, ln in runs), default=0)
+    out["air_gravity_m_s2"], out["hang_share"] = _flight_arcs(c, runs, com)
+    steps = sum(len(mm.runs(flags[sd], c.cyclic)) for sd in "lr")
+    secs = (n - 1) / c.fps if n > 1 else 1.0
+    out["steps_per_min"] = round(steps / secs * 60, 1) if secs > 0 else 0.0
+    # COM sudden changes of speed while a foot is down
+    acc = br.accel_series(com, c.fps, span=3)
+    grounded = [a for i, a in enumerate(acc, start=3) if flags["l"][i] or flags["r"][i]]
+    out["com_accel_max_m_s2"] = round(max(grounded), 1) if grounded else 0.0
+    if c.standing_still and not _has(c.name, AIR_OK + GAIT + ATTACK + SUPPORTED):
+        # static balance only: a moving body falls into its next step on purpose
+        worst, worst_side = _one_foot_balance(c, com)
+        out["one_foot_off_balance_m"] = round(worst, 3)
+        out["one_foot_side"] = worst_side
     return out
 
 
-def _issues(b: dict, name: str, feet_off_ground: bool, fps: float) -> list[tuple[str, float, str]]:
+def _flight_arcs(c: _Clip, runs: list[tuple[int, int]], com: list[tuple]) -> tuple[list[float], list[float]]:
+    """Gravity (m/s2) and hang share of each whole flight that makes a real arc."""
+    falls: list[float] = []
+    hangs: list[float] = []
+    for st, ln in runs:
+        # only whole flights: one cut off by the clip's start or end isn't a full arc
+        if ln >= 6 and not c.feet_off_ground and st > 0 and st + ln < c.n:
+            zs = [com[i][2] for i in range(st, st + ln)]
+            top = zs.index(max(zs))
+            # a real arc: rises then falls, with the top well inside the flight
+            if 2 <= top <= ln - 3 and max(zs) - zs[0] > 0.02 and max(zs) - zs[-1] > 0.02:
+                falls.append(round(-br.fall_acceleration(zs, c.fps), 2))
+                h = R.hang_share(zs)
+                if h is not None:
+                    hangs.append(h)
+    return falls, hangs
+
+
+def _one_foot_balance(c: _Clip, com: list[tuple]) -> tuple[float, str]:
+    """Standing on one foot: the furthest the weight sits outside it (m), and which foot."""
+    s, flags, n = c.s, c.flags, c.n
+    worst, worst_side = 0.0, ""
+    for i in range(n):
+        down = [sd for sd in "lr" if flags[sd][i]]
+        if len(down) != 1:
+            continue
+        j = min(i + 1, n - 1)
+        if i == j or br.length(br.sub(com[j], com[i])) * c.fps > 0.25:
+            continue
+        sd = down[0]
+        pts = [s.world[i][k] for k in (f"ankle_{sd}", f"ball_{sd}", f"toe_{sd}") if k in s.world[i]]
+        if pts:
+            d = mm.outside_support(com[i], pts)
+            if d > worst:
+                worst, worst_side = d, sd
+    return worst, worst_side
+
+
+# ---------- gait: arms against legs, chest against hips ----------
+
+
+def _gait(s: Any, hl: list[tuple], hr: list[tuple]) -> dict:
+    """Arm swing against leg swing, and chest turn against hip turn."""
+    n = len(s.world)
+    out: dict = {}
+    al, ar = _pts(s, "ankle_l"), _pts(s, "ankle_r")
+    wl = _first(s, "pt:hand_l", "tip:lowerarm_l")
+    wr = _first(s, "pt:hand_r", "tip:lowerarm_r")
+    fwd = [br.unit(br.cross(br.UP, br.flat(br.sub(hr[i], hl[i])))) for i in range(n)]
+    if al and ar and wl and wr:
+        leg = [br.dot(br.sub(al[i], ar[i]), fwd[i]) for i in range(n)]
+        arm = [br.dot(br.sub(wl[i], wr[i]), fwd[i]) for i in range(n)]
+        out["arm_leg_corr"] = round(br.correlation(arm, leg), 2)
+        out["arm_swing_m"] = round(br.spread(arm), 3)
+        out["leg_swing_m"] = round(br.spread(leg), 3)
+    sl, sr = _pts(s, "pt:upperarm_l"), _pts(s, "pt:upperarm_r")
+    if sl and sr:
+        py, cy = _yaw_series(hl, hr), _yaw_series(sl, sr)
+        out["chest_hip_corr"] = round(br.correlation(cy, py), 2)
+        out["hip_turn_deg"] = round(br.spread(py), 1)
+        out["chest_turn_deg"] = round(br.spread(cy), 1)
+    return out
+
+
+def _yaw_series(a: list[tuple], b: list[tuple]) -> list[float]:
+    """Heading of the line a->b on each frame, in degrees against the first frame."""
+    ys = [math.degrees(math.atan2(b[i][1] - a[i][1], b[i][0] - a[i][0])) for i in range(len(a))]
+    return [(y - ys[0] + 180) % 360 - 180 for y in ys]
+
+
+# ---------- spacing, sideways lean, overlap ----------
+
+
+def _spacing(c: _Clip, hp: list[tuple], hl: list[tuple] | None, hr: list[tuple] | None) -> dict:
+    """Parts gliding at one steady velocity, sideways lean in a walk or run, and an idle's overlap."""
+    out: dict = {"linear_runs": _linear_runs(c, hp)}
+    top = _first(c.s, "pt:neck", "pt:head")
+    if _has(c.name, GAIT) and top and hl and hr:
+        lean = _side_lean(c, hp, top, hl, hr)
+        if lean is not None:
+            out["lean"] = lean
+    if c.cyclic and "idle" in c.name.lower() and not _has(c.name, ("sit", "driv", "lying", "sleep")):
+        out["block_bob"] = _block_bob(c, hp)
+    return out
+
+
+def _linear_runs(c: _Clip, hp: list[tuple]) -> dict[str, tuple[int, int]]:
+    """A part gliding at one steady velocity (linear in-betweens), against the hips."""
+    s, n = c.s, c.n
+    runs: dict[str, tuple[int, int]] = {}
+    floor_z = min(
+        (q[2] for k in ("toe_l", "toe_r", "ankle_l", "ankle_r") for q in (_pts(s, k) or [])),
+        default=min(q[2] for q in hp) - 1.0,
+    )
+    for key, label in (
+        ("tip:hand_l", "left hand"),
+        ("tip:hand_r", "right hand"),
+        ("tip:head", "head"),
+        ("toe_l", "left foot"),
+        ("toe_r", "right foot"),
+    ):
+        p = _pts(s, key)
+        if p:
+            rel = [br.sub(p[i], hp[i]) for i in range(n)]
+            r = R.linear_run(rel, c.fps, [q[2] < floor_z + R.GROUND_TOL for q in p])
+            if r[0]:
+                runs[label] = r
+    # the hips against the root bone: a travelling clip moves the whole body at the game speed
+    rb = _pts(s, "rootbone")
+    r = R.linear_run([br.sub(hp[i], rb[i]) for i in range(n)] if rb and rb[0] != hp[0] else hp, c.fps)
+    if r[0]:
+        runs["hips"] = r
+    return runs
+
+
+def _side_lean(c: _Clip, hp: list[tuple], top: list[tuple], hl: list[tuple], hr: list[tuple]) -> dict | None:
+    """Leaning sideways in a walk or run, beyond what the turn needs (clamped, or it looks drunk)."""
+    turning = any(w in TURN_WORDS for w in words_of(c.name))
+    rb = _pts(c.s, "rootbone")
+    path = rb if rb and rb[0] != hp[0] and c.travels else (hp if c.travels else None)
+    if path is None and turning:
+        return None
+    need = R.turn_lean_deg(path, c.fps) if path is not None else None
+    lean = R.lean_measure(R.side_lean_deg(hp, top, hl, hr), need)
+    lean["turning"] = turning
+    return lean
+
+
+def _block_bob(c: _Clip, hp: list[tuple]) -> list[str]:
+    """Overlap: in an idle, the head and hands trail the hips' bob."""
+    n = c.n
+    m = n - 1 if n > 2 else n  # a loop's last frame repeats the first
+    parts = {
+        lab: [p[i][2] for i in range(m)]
+        for lab, key in (("head", "pt:head"), ("hands", "pt:hand_l"))
+        if (p := _pts(c.s, key))
+    }
+    return R.block_verdicts([hp[i][2] for i in range(m)], parts, c.fps)
+
+
+# ---------- attacks: anticipation, hit, recovery, wind-up, kinetic chain ----------
+
+
+def _fastest_strike(c: _Clip) -> tuple[dict, str]:
+    """The strike of the hand, forearm or foot that moves fastest, and that effector's key."""
+    best: dict = {}
+    best_key = ""
+    for key in ("tip:hand_l", "tip:hand_r", "tip:lowerarm_l", "tip:lowerarm_r", "toe_l", "toe_r"):
+        p = _pts(c.s, key)
+        if p is None:
+            continue
+        st = br.strike(p, c.fps)
+        if st and st["peak_speed_m_s"] > best.get("peak_speed_m_s", 0):
+            best, best_key = st, key
+    return best, best_key
+
+
+def _strike(c: _Clip, chest: str | None) -> dict:
+    """The fastest strike with its tell, wind-up, chest turn, kinetic chain and follow-through ({} if none)."""
+    s, fps = c.s, c.fps
+    best, best_key = _fastest_strike(c)
+    if not best:
+        return best
+    best["effector"] = best_key.split(":")[-1]
+    best["path_corners"] = R.path_corners(_pts(s, best_key) or [], fps)
+    keys = [
+        k for k in ("hips", "pt:spine3", "pt:head", "tip:hand_l", "tip:hand_r", "toe_l", "toe_r") if k in s.world[0]
+    ]
+    tell = R.tell_s(br.speeds(_pts(s, best_key) or [], fps), fps, [[w[k] for k in keys] for w in s.world])
+    best["tell_s"] = None if tell is None else round(tell, 3)
+    split = _windup_split(c, best_key)
+    if split:
+        best["windup_split"] = split
+    if chest:
+        q0 = s.world_q[0][chest]
+        best["chest_turn_deg"] = round(max(mm.q_angle_deg(q0, q[chest]) for q in s.world_q), 1)
+    peaks = _chain_peaks(c, best_key)
+    if peaks is not None:
+        best["chain_peaks"] = peaks
+    lsp = br.speeds(_pts(s, best_key) or [], fps)
+    best["follow_through_s"] = R.follow_through_s(lsp, fps)
+    core = _first(s, "pt:spine3", "pt:spine2", "pt:neck", "pt:hips")
+    if core and lsp:
+        best["body_follow_s"] = R.follow_through_s(br.speeds(core, fps), fps, R.hit_end(lsp))
+    return best
+
+
+def _windup_split(c: _Clip, key: str) -> dict | None:
+    """A draw-back is against the body (the path relative to the hips), as for animals: when the fastest burst
+    is a wind-up and the strike is a later burst going the other way, both are noted."""
+    hp, ep = _pts(c.s, "hips"), _pts(c.s, key)
+    if not (hp and ep):
+        return None
+    return R.split_windup([tuple(p - q for p, q in zip(e, h)) for e, h in zip(ep, hp)], c.fps)
+
+
+def _chain_peaks(c: _Clip, key: str) -> list[int] | None:
+    """Frames where hips, chest, upper arm, forearm and then the hand turn fastest (arm strikes only)."""
+    roles, s = c.roles, c.s
+    side = key[-1]
+    chain = [
+        roles.get(r)
+        for r in ("hips", "spine3" if "spine3" in roles else "spine2", f"upperarm_{side}", f"lowerarm_{side}")
+    ]
+    bones = [b for b in chain if b]
+    if len(bones) != len(chain) or not ("hand" in key or "lowerarm" in key):
+        return None
+    peaks = [
+        br.peak_frame([mm.q_angle_deg(s.world_q[i][b], s.world_q[i + 1][b]) for i in range(c.n - 1)]) for b in bones
+    ]
+    return [*peaks, br.peak_frame(br.speeds(_pts(s, key) or [], c.fps))]
+
+
+# ---------- verdicts ----------
+
+
+def _issues(b: dict, name: str, feet_off_ground: bool, fps: float) -> list[Issue]:
     """(key, size, message) for every problem in one measurement. Bigger size = worse."""
-    out: list[tuple[str, float, str]] = []
-    side_word = {"l": "left", "r": "right"}
+    out: list[Issue] = []
     for side in "lr":
-        k = b.get(f"knee_{side}")
-        if k:
-            if k["backward_frames"]:
-                out.append(
-                    (
-                        f"knee_back_{side}",
-                        k["worst_backward_deg"],
-                        f"FAIL {side_word[side]} knee bends backwards ({k['worst_backward_deg']:.0f} degrees, "
-                        f"{len(k['backward_frames'])} frames). A knee is a hinge: it only folds forward.",
-                    )
-                )
-            if k["max_bend_deg"] > br.KNEE_FOLD_FAIL:
-                out.append(
-                    (
-                        f"knee_fold_{side}",
-                        k["max_bend_deg"],
-                        f"FAIL {side_word[side]} knee folds {k['max_bend_deg']:.0f} degrees: past a full squat "
-                        "(about 155), so the shin is passing through the thigh.",
-                    )
-                )
-            if k["worst_sideways_deg"]:
-                out.append(
-                    (
-                        f"knee_side_{side}",
-                        k["worst_sideways_deg"],
-                        f"WARN {side_word[side]} knee bends sideways ({k['worst_sideways_deg']:.0f} degrees off "
-                        "its hinge): knees don't bend side to side; turn the thigh instead.",
-                    )
-                )
-        e = b.get(f"elbow_{side}")
-        if e:
-            if e["backward_frames"]:
-                out.append(
-                    (
-                        f"elbow_back_{side}",
-                        e["worst_backward_deg"],
-                        f"FAIL {side_word[side]} elbow bends the wrong way ({e['worst_backward_deg']:.0f} degrees, "
-                        f"{len(e['backward_frames'])} frames). An elbow is a hinge: it only folds one way.",
-                    )
-                )
-            if e["max_bend_deg"] > br.ELBOW_FOLD_FAIL:
-                out.append(
-                    (
-                        f"elbow_fold_{side}",
-                        e["max_bend_deg"],
-                        f"FAIL {side_word[side]} elbow folds {e['max_bend_deg']:.0f} degrees: an elbow stops "
-                        "at about 150, where the forearm meets the upper arm.",
-                    )
-                )
-            if e["worst_sideways_deg"]:
-                out.append(
-                    (
-                        f"elbow_side_{side}",
-                        e["worst_sideways_deg"],
-                        f"WARN {side_word[side]} elbow bends sideways ({e['worst_sideways_deg']:.0f} degrees off "
-                        "its hinge): twist the forearm or turn the shoulder instead.",
-                    )
-                )
-        w = b.get(f"wrist_{side}")
-        if w and w["bend_deg"] > br.WRIST_BEND_FAIL:
-            out.append(
-                (
-                    f"wrist_{side}",
-                    w["bend_deg"],
-                    f"FAIL {side_word[side]} wrist bends {w['bend_deg']:.0f} degrees: a wrist manages about "
-                    "80 forward, 70 back, 30 to the side.",
-                )
+        out += _knee_issues(b.get(f"knee_{side}"), side)
+        out += _elbow_issues(b.get(f"elbow_{side}"), side)
+        out += _wrist_issues(b.get(f"wrist_{side}"), side)
+    out += _trunk_issues(b)
+    out += _air_issues(b, name, feet_off_ground)
+    out += _balance_issues(b)
+    out += _gait_issues(b, name)
+    out += _spacing_issues(b, fps)
+    st = b.get("strike")
+    if st:
+        out += _strike_issues(st, name, fps)
+    return [_misread(k, v, m) for k, v, m in out]
+
+
+def _knee_issues(k: dict | None, side: str) -> list[Issue]:
+    """A knee bending backwards, folding through the thigh, or bending sideways."""
+    if not k:
+        return []
+    out: list[Issue] = []
+    word = SIDE_WORD[side]
+    if k["backward_frames"]:
+        out.append(
+            (
+                f"knee_back_{side}",
+                k["worst_backward_deg"],
+                f"FAIL {word} knee bends backwards ({k['worst_backward_deg']:.0f} degrees, "
+                f"{len(k['backward_frames'])} frames). A knee is a hinge: it only folds forward.",
             )
+        )
+    if k["max_bend_deg"] > br.KNEE_FOLD_FAIL:
+        out.append(
+            (
+                f"knee_fold_{side}",
+                k["max_bend_deg"],
+                f"FAIL {word} knee folds {k['max_bend_deg']:.0f} degrees: past a full squat "
+                "(about 155), so the shin is passing through the thigh.",
+            )
+        )
+    if k["worst_sideways_deg"]:
+        out.append(
+            (
+                f"knee_side_{side}",
+                k["worst_sideways_deg"],
+                f"WARN {word} knee bends sideways ({k['worst_sideways_deg']:.0f} degrees off "
+                "its hinge): knees don't bend side to side; turn the thigh instead.",
+            )
+        )
+    return out
+
+
+def _elbow_issues(e: dict | None, side: str) -> list[Issue]:
+    """An elbow bending the wrong way, folding past the upper arm, or bending sideways."""
+    if not e:
+        return []
+    out: list[Issue] = []
+    word = SIDE_WORD[side]
+    if e["backward_frames"]:
+        out.append(
+            (
+                f"elbow_back_{side}",
+                e["worst_backward_deg"],
+                f"FAIL {word} elbow bends the wrong way ({e['worst_backward_deg']:.0f} degrees, "
+                f"{len(e['backward_frames'])} frames). An elbow is a hinge: it only folds one way.",
+            )
+        )
+    if e["max_bend_deg"] > br.ELBOW_FOLD_FAIL:
+        out.append(
+            (
+                f"elbow_fold_{side}",
+                e["max_bend_deg"],
+                f"FAIL {word} elbow folds {e['max_bend_deg']:.0f} degrees: an elbow stops "
+                "at about 150, where the forearm meets the upper arm.",
+            )
+        )
+    if e["worst_sideways_deg"]:
+        out.append(
+            (
+                f"elbow_side_{side}",
+                e["worst_sideways_deg"],
+                f"WARN {word} elbow bends sideways ({e['worst_sideways_deg']:.0f} degrees off "
+                "its hinge): twist the forearm or turn the shoulder instead.",
+            )
+        )
+    return out
+
+
+def _wrist_issues(w: dict | None, side: str) -> list[Issue]:
+    """A wrist bent past what a wrist manages."""
+    if not (w and w["bend_deg"] > br.WRIST_BEND_FAIL):
+        return []
+    return [
+        (
+            f"wrist_{side}",
+            w["bend_deg"],
+            f"FAIL {SIDE_WORD[side]} wrist bends {w['bend_deg']:.0f} degrees: a wrist manages about "
+            "80 forward, 70 back, 30 to the side.",
+        )
+    ]
+
+
+def _trunk_issues(b: dict) -> list[Issue]:
+    """The head against the chest, the chest against the hips, and a thigh behind the pelvis."""
+    out: list[Issue] = []
     nk = b.get("neck")
     if nk and (nk["bend_deg"] > br.NECK_TURN_FAIL or nk["twist_deg"] > br.NECK_TURN_FAIL):
         out.append(
@@ -474,25 +663,24 @@ def _issues(b: dict, name: str, feet_off_ground: bool, fps: float) -> list[tuple
             )
         )
     sp = b.get("spine")
-    if sp:
-        if sp["twist_deg"] > br.SPINE_TWIST_FAIL:
-            out.append(
-                (
-                    "spine_twist",
-                    sp["twist_deg"],
-                    f"FAIL chest twists {sp['twist_deg']:.0f} degrees against the hips: a spine twists about "
-                    "45-60. Turn the hips or step round instead.",
-                )
+    if sp and sp["twist_deg"] > br.SPINE_TWIST_FAIL:
+        out.append(
+            (
+                "spine_twist",
+                sp["twist_deg"],
+                f"FAIL chest twists {sp['twist_deg']:.0f} degrees against the hips: a spine twists about "
+                "45-60. Turn the hips or step round instead.",
             )
-        if sp["bend_deg"] > br.SPINE_BEND_FAIL:
-            out.append(
-                (
-                    "spine_bend",
-                    sp["bend_deg"],
-                    f"FAIL chest bends {sp['bend_deg']:.0f} degrees against the hips: past what a spine does "
-                    "(about 90). Bend at the hips for the rest.",
-                )
+        )
+    if sp and sp["bend_deg"] > br.SPINE_BEND_FAIL:
+        out.append(
+            (
+                "spine_bend",
+                sp["bend_deg"],
+                f"FAIL chest bends {sp['bend_deg']:.0f} degrees against the hips: past what a spine does "
+                "(about 90). Bend at the hips for the rest.",
             )
+        )
     if b.get("hip_extension_deg", 0) > br.HIP_EXTENSION_WARN:
         out.append(
             (
@@ -502,6 +690,12 @@ def _issues(b: dict, name: str, feet_off_ground: bool, fps: float) -> list[tuple
                 "20 walking and 30 sprinting. Tilt the pelvis forward to get more.",
             )
         )
+    return out
+
+
+def _air_issues(b: dict, name: str, feet_off_ground: bool) -> list[Issue]:
+    """Floating off the ground, a run that never leaves it, and the fall and hang of each flight."""
+    out: list[Issue] = []
     air_ok = _has(name, AIR_OK) or feet_off_ground
     la = b.get("longest_airborne", 0)
     if not air_ok and la >= 2:
@@ -522,7 +716,16 @@ def _issues(b: dict, name: str, feet_off_ground: bool, fps: float) -> list[tuple
                 "a fast walk. A run leaves the ground on every step.",
             )
         )
-    for g in b.get("air_gravity_m_s2", []):
+    out += _gravity_issues(b.get("air_gravity_m_s2", []))
+    for v in R.hang_verdicts(b.get("hang_share", [])):
+        out.append(("hang", 1 - min(b["hang_share"]), v))
+    return out
+
+
+def _gravity_issues(falls: list[float]) -> list[Issue]:
+    """Each flight's fall against real gravity (9.8 m/s2): floaty below 6.5, heavy above 14."""
+    out: list[Issue] = []
+    for g in falls:
         if g < 6.5:
             out.append(
                 (
@@ -542,8 +745,12 @@ def _issues(b: dict, name: str, feet_off_ground: bool, fps: float) -> list[tuple
                     "gravity matches.",
                 )
             )
-    for v in R.hang_verdicts(b.get("hang_share", [])):
-        out.append(("hang", 1 - min(b["hang_share"]), v))
+    return out
+
+
+def _balance_issues(b: dict) -> list[Issue]:
+    """Leaning sideways, sudden changes of speed on the feet, and the weight off a standing foot."""
+    out: list[Issue] = []
     ln_ = b.get("lean")
     if ln_:
         for v in R.lean_verdicts(ln_, ln_.get("turning", False)):
@@ -558,7 +765,7 @@ def _issues(b: dict, name: str, feet_off_ground: bool, fps: float) -> list[tuple
             )
         )
     if b.get("one_foot_off_balance_m", 0) > 0.08:
-        sd = {"l": "left", "r": "right"}.get(b.get("one_foot_side", ""), "one")
+        sd = SIDE_WORD.get(b.get("one_foot_side", ""), "one")
         out.append(
             (
                 "one_foot",
@@ -567,6 +774,12 @@ def _issues(b: dict, name: str, feet_off_ground: bool, fps: float) -> list[tuple
                 "it: shift the hips over the standing foot before the other one lifts (weight shifts lead).",
             )
         )
+    return out
+
+
+def _gait_issues(b: dict, name: str) -> list[Issue]:
+    """A walk's cadence, arms swinging with the same-side leg, and a chest turning with the hips."""
+    out: list[Issue] = []
     spm = b.get("steps_per_min")
     walking = spm and _has(name, ("walk",)) and not _has(name, RUNNING) and b.get("airborne_frames", 0) == 0
     if walking and (spm > 140 or spm < 70):
@@ -596,65 +809,83 @@ def _issues(b: dict, name: str, feet_off_ground: bool, fps: float) -> list[tuple
                 "them: in a walk the shoulders twist the opposite way to the hips.",
             )
         )
+    return out
+
+
+def _spacing_issues(b: dict, fps: float) -> list[Issue]:
+    """Parts gliding at one steady velocity, and an idle that moves as one block."""
+    out: list[Issue] = []
     for v in R.linear_verdicts({k: tuple(r) for k, r in b.get("linear_runs", {}).items()}, fps):
         out.append(("linear", max(r[0] for r in b["linear_runs"].values()), v))
     for v in b.get("block_bob", []):
         out.append(("block", 1.0, v))
-    st = b.get("strike")
-    nice = ""
-    if st:
-        eff = st["effector"]
-        part = eff[:-2].replace("lowerarm", "forearm") if eff[-2:] in ("_l", "_r") else eff
-        side = "left " if eff.endswith("_l") else "right " if eff.endswith("_r") else ""
-        nice = f"the {side}{part}'s strike"
-    if st and R.is_enemy(name):  # an enemy's attack must give the player time to react
+    return out
+
+
+def _strike_label(effector: str) -> str:
+    """How the verdicts name a strike: "toe_l" -> "the left toe's strike"."""
+    part = effector[:-2].replace("lowerarm", "forearm") if effector[-2:] in ("_l", "_r") else effector
+    side = "left " if effector.endswith("_l") else "right " if effector.endswith("_r") else ""
+    return f"the {side}{part}'s strike"
+
+
+def _strike_issues(st: dict, name: str, fps: float) -> list[Issue]:
+    """An enemy's tell, a wind-up that outruns the hit, the hit's lead-in and length, and the body behind it."""
+    out: list[Issue] = []
+    nice = _strike_label(st["effector"])
+    if R.is_enemy(name):  # an enemy's attack must give the player time to react
         for v in R.reaction_verdicts(st.get("tell_s"), nice):
             out.append(("tell", st.get("tell_s") or 0.0, v))
-    if st:
-        # the fastest move was a draw-back going the other way, faster than the hit (as for animals, 0.8)
-        for v in R.windup_outruns_verdicts(st.get("windup_split"), nice):
-            out.append(("windup_fast", st["windup_split"]["windup_m_s"], v))
-        f30 = st["hit_frames"] * 30.0 / fps
-        if st["reach_m"] > 0.4 and st["windup_m"] < 0.03 and st["anticipation_s"] < 0.05:
-            out.append(
-                (
-                    "no_windup",
-                    st["reach_m"],
-                    f"WARN the {st['effector']} strikes {st['reach_m']:.2f} m from the "
-                    "first frame with no wind-up: a big hit needs a lead-in (anticipation), even a short one.",
-                )
+    # the fastest move was a draw-back going the other way, faster than the hit (as for animals, 0.8)
+    for v in R.windup_outruns_verdicts(st.get("windup_split"), nice):
+        out.append(("windup_fast", st["windup_split"]["windup_m_s"], v))
+    f30 = st["hit_frames"] * 30.0 / fps
+    if st["reach_m"] > 0.4 and st["windup_m"] < 0.03 and st["anticipation_s"] < 0.05:
+        out.append(
+            (
+                "no_windup",
+                st["reach_m"],
+                f"WARN the {st['effector']} strikes {st['reach_m']:.2f} m from the "
+                "first frame with no wind-up: a big hit needs a lead-in (anticipation), even a short one.",
             )
-        if f30 > 10:
-            out.append(
-                (
-                    "slow_hit",
-                    f30,
-                    f"WARN the hit takes {st['hit_frames']} frames ({f30:.0f} at 30 fps): 4-8 "
-                    "frames at 30 fps reads as a hit; longer reads as a push.",
-                )
+        )
+    if f30 > 10:
+        out.append(
+            (
+                "slow_hit",
+                f30,
+                f"WARN the hit takes {st['hit_frames']} frames ({f30:.0f} at 30 fps): 4-8 "
+                "frames at 30 fps reads as a hit; longer reads as a push.",
             )
-        if st["reach_m"] > 0.4 and st.get("chest_turn_deg", 99) < 3:
-            out.append(
-                (
-                    "stiff_body",
-                    st["reach_m"],
-                    "WARN only the limb moves: the chest stays still. Let the move "
-                    "ripple into the shoulder and chest a little (everything is connected).",
-                )
+        )
+    return out + _strike_body_issues(st)
+
+
+def _strike_body_issues(st: dict) -> list[Issue]:
+    """A strike where only the limb moves, its path turns corners, or the hand outruns the chest."""
+    out: list[Issue] = []
+    if st["reach_m"] > 0.4 and st.get("chest_turn_deg", 99) < 3:
+        out.append(
+            (
+                "stiff_body",
+                st["reach_m"],
+                "WARN only the limb moves: the chest stays still. Let the move "
+                "ripple into the shoulder and chest a little (everything is connected).",
             )
-        if st.get("path_corners"):
-            out.append(("arc", len(st["path_corners"]), R.arc_verdicts(st["path_corners"], f"the {st['effector']}")[0]))
-        pk = st.get("chain_peaks")
-        if pk and len(pk) >= 3 and pk[-1] + 2 < pk[1]:
-            out.append(
-                (
-                    "chain",
-                    pk[1] - pk[-1],
-                    "WARN the hand is fastest before the chest moves: power runs hips, "
-                    "chest, shoulder, elbow, hand, each a frame or two after the last.",
-                )
+        )
+    if st.get("path_corners"):
+        out.append(("arc", len(st["path_corners"]), R.arc_verdicts(st["path_corners"], f"the {st['effector']}")[0]))
+    pk = st.get("chain_peaks")
+    if pk and len(pk) >= 3 and pk[-1] + 2 < pk[1]:
+        out.append(
+            (
+                "chain",
+                pk[1] - pk[-1],
+                "WARN the hand is fastest before the chest moves: power runs hips, "
+                "chest, shoulder, elbow, hand, each a frame or two after the last.",
             )
-    return [_misread(k, v, m) for k, v, m in out]
+        )
+    return out
 
 
 MISREAD_NOTE = (
