@@ -14,6 +14,7 @@ import bpy
 from .core import body as body_checks
 from .core import checks, creature, creature_fix, edit, rig, skin
 from .core.report import CheckResult
+from .core.rig import action_fcurves
 
 REPORT_NAME = "GaitKeeper report"
 POSE_CLIP = re.compile(r"(^|[^a-z0-9])[ta][ _-]?pose([^a-z0-9]|$)")  # T-pose and A-pose clips, never checked
@@ -110,7 +111,8 @@ def kept_action(arm: bpy.types.Object) -> Iterator[None]:
 
 
 def body_kind(arm: bpy.types.Object, legs: dict, settings) -> tuple[bool, bool]:
-    """(animal, hopper). Auto: four legs, or two legs and a tail, is an animal; two legs and a tail hop."""
+    """(animal, hopper). Auto: four legs, or two legs and a tail, is an animal. Two legs and a tail hop unless
+    the stepping clips show the feet taking turns (an emu walks; a kangaroo hops)."""
     tail = any(TAIL.search(b.name.lower()) for b in arm.data.bones)
     fore = any(k.startswith("fore") for k in legs)
     animal, hopper = fore or tail, tail and not fore and len(legs) == 2
@@ -118,7 +120,17 @@ def body_kind(arm: bpy.types.Object, legs: dict, settings) -> tuple[bool, bool]:
         animal = settings.body == "CREATURE"
     if settings.hopper != "AUTO":
         hopper = settings.hopper == "YES"
+    elif hopper:
+        hopper = hops_by_motion(arm, legs) is not False
     return animal, hopper
+
+
+def hops_by_motion(arm: bpy.types.Object, legs: dict) -> bool | None:
+    """Whether a two-legged animal's stepping clips move its feet together (None: no clip tells).
+    Plays the clips, then puts the scene back as it was."""
+    scene = bpy.context.scene
+    with kept_transforms(scene), kept_frame(scene), kept_action(arm):
+        return creature.hops(arm, clips_to_check(arm, False), legs, pelvis_bone(arm, legs), scene)
 
 
 def pelvis_bone(arm: bpy.types.Object, legs: dict) -> str:
@@ -137,16 +149,6 @@ def animal_rig(arm: bpy.types.Object, settings) -> AnimalRig | None:
     if not animal or not legs:
         return None
     return AnimalRig(legs, pelvis_bone(arm, legs), hopper, creature.rest_width(arm, legs))
-
-
-def action_fcurves(act: bpy.types.Action) -> list[bpy.types.FCurve]:
-    """Every F-curve in the action: the legacy list (before Blender 5.0) and the layered channelbags (4.4+)."""
-    curves = list(getattr(act, "fcurves", None) or [])
-    for layer in getattr(act, "layers", []):
-        for strip in layer.strips:
-            for bag in getattr(strip, "channelbags", []):
-                curves += list(bag.fcurves)
-    return curves
 
 
 def animates(act: bpy.types.Action, arm: bpy.types.Object) -> bool:

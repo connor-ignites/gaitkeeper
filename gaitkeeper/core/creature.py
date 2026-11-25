@@ -12,9 +12,11 @@ import math
 
 import bpy
 
+from . import adapt_math as am
 from . import body_rules as br
 from . import legs as L
 from . import reactions as R
+from .rig import body_axes, clip_range, rest_space, set_action
 
 SKIP = (
     "tail",
@@ -43,7 +45,7 @@ TOPS_OFF = ("clavicle", "shoulder", "scapula", "collar")
 
 def find_legs(arm: bpy.types.Object) -> dict[str, list[str]]:
     """leg name ("hind_l", "fore_r") -> bone names from the top joint down to the end."""
-    mw = arm.matrix_world
+    mw = rest_space(arm, None)
     bones = [b for b in arm.data.bones if not any(k in b.name.lower() for k in SKIP)]
     zs = [(mw @ b.head_local).z for b in bones]  # joints of real bones only: helper tails can sit below the floor
     lo, hi = min(zs), max(zs)
@@ -85,6 +87,52 @@ def find_legs(arm: bpy.types.Object) -> dict[str, list[str]]:
 def loops(name: str) -> bool:
     """An animal clip that repeats: by its name."""
     return any(w in name.lower() for w in ("loop", "walk", "run", "hop", "trot", "gallop", "idle", "graze"))
+
+
+STEPPING = ("walk", "run", "trot", "gallop", "jog", "sprint", "hop", "jump", "bound")
+
+
+def feet_tracks(
+    arm: bpy.types.Object, act: bpy.types.Action, legs: dict[str, list[str]], pelvis: str, scene: bpy.types.Scene
+) -> tuple[list[list[float]], list[list[float]]]:
+    """Per hind foot (left, right): its height and how far ahead of the pelvis it is, frame by frame."""
+    set_action(arm, act)
+    fwd = body_axes(arm, leg_roles(arm, legs, pelvis))[0]
+    mw = arm.matrix_world
+    tracks: dict[str, list[list[float]]] = {s: [[], []] for s in "lr"}
+    first, last = clip_range(act)
+    for f in range(first, last + 1):
+        scene.frame_set(f)
+        hips = mw @ arm.pose.bones[pelvis].head
+        for s, (height, ahead) in tracks.items():
+            foot = mw @ arm.pose.bones[legs[f"hind_{s}"][-1]].head
+            height.append(foot.z)
+            ahead.append((foot - hips).dot(fwd))
+    return tracks["l"], tracks["r"]
+
+
+def feet_in_phase(left: list[list[float]], right: list[list[float]], fps: float, cyclic: bool) -> bool | None:
+    """True when the feet move together (a hop), False when they take turns (a walk), None when neither shows."""
+    period = am.step_period(left, fps, cyclic)
+    if period and am.sides_alternate(left, right, period, cyclic):
+        return False
+    return True if am.sides_together(left, right, cyclic) else None
+
+
+def hops(
+    arm: bpy.types.Object, acts: list[bpy.types.Action], legs: dict[str, list[str]], pelvis: str, scene: bpy.types.Scene
+) -> bool | None:
+    """Whether a two-legged animal hops (a kangaroo) rather than walks (an emu), by its stepping clips (named
+    walk, run, hop...): most of them move the feet together. None when no clip tells. Leaves the clip and
+    frame it plays; the caller puts them back."""
+    fps = scene.render.fps / scene.render.fps_base
+    votes = []
+    for act in acts:
+        if any(w in act.name.lower() for w in STEPPING):
+            vote = feet_in_phase(*feet_tracks(arm, act, legs, pelvis, scene), fps, loops(act.name))
+            if vote is not None:
+                votes.append(vote)
+    return 2 * sum(votes) > len(votes) if votes else None
 
 
 def measure_clip(
@@ -394,7 +442,7 @@ def measure_strike(
 
 def rest_width(arm: bpy.types.Object, legs: dict[str, list[str]]) -> dict[str, float]:
     """Feet width over hip width in the rest pose, per leg pair."""
-    mw = arm.matrix_world
+    mw = rest_space(arm, None)
     out = {}
     for end in ("hind", "fore"):
         if f"{end}_l" in legs and f"{end}_r" in legs:

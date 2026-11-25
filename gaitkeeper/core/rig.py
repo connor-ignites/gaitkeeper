@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import re
 from collections.abc import Sequence
 
 import bpy
-from mathutils import Quaternion, Vector
+from mathutils import Euler, Matrix, Quaternion, Vector
 
 from . import motion_math as mm
 
@@ -185,6 +186,114 @@ def key_rotation(pb: bpy.types.PoseBone, frame: int) -> None:
     pb.keyframe_insert(rotation_path(pb), frame=frame, group=pb.name)
 
 
+def action_fcurves(act: bpy.types.Action) -> list[bpy.types.FCurve]:
+    """Every F-curve in the action: the legacy list (before Blender 5.0) and the layered channelbags (4.4+)."""
+    curves = list(getattr(act, "fcurves", None) or [])
+    for layer in getattr(act, "layers", []):
+        for strip in layer.strips:
+            for bag in getattr(strip, "channelbags", []):
+                curves += list(bag.fcurves)
+    return curves
+
+
+HELD_TOL = 1e-4  # how far a held channel's keys may differ and still count as one value
+
+
+def top_bone(arm: bpy.types.Object, hips: str | None) -> str | None:
+    """The bone at the top of the skeleton above the hips (None when the hips are the top bone). Without a
+    hips bone (an animal before its legs are known): the only top bone with children."""
+    bones = arm.data.bones
+    if hips is not None:
+        if hips not in bones:
+            return None
+        top = bones[hips]
+        while top.parent is not None:
+            top = top.parent
+        return top.name if top.name != hips else None
+    tops = [b.name for b in bones if b.parent is None and b.children]
+    return tops[0] if len(tops) == 1 else None
+
+
+def held_values(arm: bpy.types.Object, bone: str) -> dict[tuple[str, int], float] | None:
+    """(property, index) -> value of every channel the current clip keys on the bone, when its rotation and
+    scale each hold a single value through the whole clip (keys and handles). A location channel that moves
+    (root motion) reads as 0, the rest position. None when the bone turns or scales, or isn't keyed."""
+    ad = arm.animation_data
+    act = ad.action if ad else None
+    if act is None:
+        return None
+    prefix = f'pose.bones["{bone}"].'
+    out: dict[tuple[str, int], float] = {}
+    for fc in action_fcurves(act):
+        if not fc.data_path.startswith(prefix) or not fc.keyframe_points:
+            continue
+        prop = fc.data_path[len(prefix) :]
+        ys = [y for k in fc.keyframe_points for y in (k.co[1], k.handle_left[1], k.handle_right[1])]
+        held = max(ys) - min(ys) <= HELD_TOL and not fc.modifiers
+        if not held and prop != "location":
+            return None
+        out[(prop, fc.array_index)] = fc.keyframe_points[0].co[1] if held else 0.0
+    return out or None
+
+
+def held_pose(arm: bpy.types.Object, bone: str) -> Matrix | None:
+    """The bone's pose (its matrix_basis) when the current clip holds it still and away from its rest pose,
+    else None. Channels the clip doesn't key keep the bone's own values."""
+    vals = held_values(arm, bone)
+    if vals is None:
+        return None
+    pb = arm.pose.bones[bone]
+
+    def channel(prop: str, current: Sequence[float]) -> list[float]:
+        return [vals.get((prop, i), v) for i, v in enumerate(current)]
+
+    loc = Vector(channel("location", pb.location))
+    if pb.rotation_mode == "QUATERNION":
+        rot = Quaternion(channel("rotation_quaternion", pb.rotation_quaternion)).normalized()
+    elif pb.rotation_mode == "AXIS_ANGLE":
+        angle, *axis = channel("rotation_axis_angle", pb.rotation_axis_angle)
+        rot = Quaternion(axis, angle)
+    else:
+        rot = Euler(channel("rotation_euler", pb.rotation_euler), pb.rotation_mode).to_quaternion()
+    pose = Matrix.LocRotScale(loc, rot, Vector(channel("scale", pb.scale)))
+    still = all(abs(a - b) < HELD_TOL for ra, rb in zip(pose, Matrix.Identity(4)) for a, b in zip(ra, rb))
+    return None if still else pose
+
+
+def held_root(arm: bpy.types.Object, hips: str | None) -> tuple[str, Matrix] | None:
+    """(bone, pose) for a top bone above the hips that the current clip holds in one pose away from rest."""
+    root = top_bone(arm, hips)
+    pose = held_pose(arm, root) if root else None
+    return (root, pose) if root and pose is not None else None
+
+
+def rest_space(arm: bpy.types.Object, hips: str | None) -> Matrix:
+    """The matrix that takes armature-space rest data (head_local, matrix_local) to world space as the clip
+    shows the body: usually the object's world matrix. Some packs (Kevin Iglesias, exported from Unity) keep a
+    top bone above the hips whose pose never changes but stands the body up and scales it 100 times: the rest
+    pose lies on its back while every frame stands up. That held pose is folded in here, in memory only, so
+    forward, left and right, limb directions and sizes read from the rest pose match the frames. The rig, its
+    rest pose and the clip are never changed. Assumes every bone the checks read hangs from that top bone."""
+    held = held_root(arm, hips)
+    if held is None:
+        return arm.matrix_world.copy()
+    ml = arm.data.bones[held[0]].matrix_local
+    return arm.matrix_world @ ml @ held[1] @ ml.inverted()
+
+
+def metres_per_unit(arm: bpy.types.Object, hips: str | None) -> float:
+    """World units to metres for reading clips. 1, except when a held top bone's scale only undoes the
+    object's (Unity exports: object 0.01, root bone 100), which leaves a body in centimetres on screen: then
+    the root's scale is left out, as the game engine reads the clip."""
+    held = held_root(arm, hips)
+    if held is None:
+        return 1.0
+    root_scale = sum(held[1].to_scale()) / 3
+    object_scale = sum(arm.matrix_world.to_scale()) / 3
+    undoes = abs(root_scale * object_scale - 1) < 0.01 and abs(root_scale - 1) > 0.01
+    return 1 / root_scale if undoes else 1.0
+
+
 def clip_range(act: bpy.types.Action) -> tuple[int, int]:
     a, b = act.frame_range
     return math.floor(a + 1e-4), math.ceil(b - 1e-4)
@@ -201,6 +310,18 @@ class Sample:
         self.rest_axis: dict[str, tuple] = {}  # bone -> its long axis (head to tail) at rest, world
         self.roles: dict[str, str] = {}  # humanoid role -> bone name
         self.rest_fwd: tuple | None = None  # the way the feet point in the rest pose (world, flat)
+        self.metres: float = 1.0  # world units to metres (metres_per_unit)
+
+
+def in_metres(s: Sample) -> Sample:
+    """The sample with its world positions in metres: itself when they already are, else a scaled copy
+    (the original keeps world units, which Fix and Adapt write back into the scene)."""
+    if s.metres == 1.0:
+        return s
+    out = copy.copy(s)
+    out.world = [{k: tuple(v * s.metres for v in p) for k, p in fr.items()} for fr in s.world]
+    out.metres = 1.0
+    return out
 
 
 def leg_sides(roles: dict[str, str]) -> list[str]:
@@ -249,19 +370,20 @@ def sample(arm: bpy.types.Object, act: bpy.types.Action, roles: dict[str, str]) 
     s = Sample()
     a, b = clip_range(act)
     scn = bpy.context.scene
-    mw = arm.matrix_world
+    rest = rest_space(arm, roles.get("hips"))
     s.roles = dict(roles)
+    s.metres = metres_per_unit(arm, roles.get("hips"))
     s.rest_fwd = tuple(body_axes(arm, roles)[0])
     for bone in arm.data.bones:
-        s.rest_q[bone.name] = tuple((mw @ bone.matrix_local).to_quaternion())
-        s.rest_axis[bone.name] = tuple((mw.to_3x3() @ (bone.tail_local - bone.head_local)).normalized())
+        s.rest_q[bone.name] = tuple((rest @ bone.matrix_local).to_quaternion())
+        s.rest_axis[bone.name] = tuple((rest.to_3x3() @ (bone.tail_local - bone.head_local)).normalized())
     # A limb's rest direction is its joint to the next joint, not its tail: FBX files have no tails, and the
     # importer guesses them, sometimes backwards on one side (Unity's Starter Assets rig: the right thigh's
     # tail points up, so a normal knee read as bent backwards and the thigh as swung 180 degrees).
     for role, nxt in NEXT_JOINT.items():
         here, there = roles.get(role), roles.get(nxt)
         if here and there and here in arm.data.bones and there in arm.data.bones:
-            d = mw.to_3x3() @ (arm.data.bones[there].head_local - arm.data.bones[here].head_local)
+            d = rest.to_3x3() @ (arm.data.bones[there].head_local - arm.data.bones[here].head_local)
             if d.length > 1e-6:
                 s.rest_axis[here] = tuple(d.normalized())
     for f in range(a, b + 1):
@@ -303,8 +425,8 @@ def interp_list(vals: list[float], t: float) -> float:
 
 
 def body_axes(arm: bpy.types.Object, roles: dict[str, str]) -> tuple[Vector, Vector, Vector]:
-    """(forward, right, up) in world space, from the rest pose: feet point forward."""
-    mw = arm.matrix_world.to_3x3()
+    """(forward, right, up) in world space, from the rest pose (as rest_space reads it): feet point forward."""
+    mw = rest_space(arm, roles.get("hips")).to_3x3()
     fwd = Vector((0, 0, 0))
     for side in "lr":
         f, t = roles.get(f"foot_{side}"), roles.get(f"toe_{side}")

@@ -11,7 +11,7 @@ from mathutils import Vector
 from . import body as body_checks
 from . import motion_math as mm
 from . import reactions as R
-from .rig import Sample, clip_label, contact_flags
+from .rig import Sample, clip_label, contact_flags, in_metres, metres_per_unit, rest_space
 
 SMALL_BONES = ("leaf", "index", "middle", "ring", "pinky", "thumb", "finger", "toe_end", "twist")
 NOT_STANDING = (
@@ -36,6 +36,7 @@ NOT_STANDING = (
 
 def measure(s: Sample, fps: float, cyclic: bool, arm: bpy.types.Object, name: str = "") -> dict:
     name = clip_label(arm, name)  # "root|Scene" says nothing: read the file's name too
+    s = in_metres(s)  # every distance below is in metres
     n = len(s.world)
     out: dict = {"frames": n, "seconds": round((n - 1) / fps, 3), "feet": {}, "name": name, "fps": fps}
     lowest_sole = math.inf
@@ -244,8 +245,9 @@ REQUIRED = [
 
 
 def rig_report(arm: bpy.types.Object, roles: dict[str, str]) -> dict:
-    """Checks on the skeleton itself (no clip): bone map, left/right, rest pose, size, root bone."""
-    mw = arm.matrix_world
+    """Checks on the skeleton itself: bone map, left/right, rest pose, size, root bone. The rest pose is read
+    as the current clip shows it (a top bone the clip holds still is folded in: rig.rest_space)."""
+    mw = rest_space(arm, roles.get("hips"))
     bones = arm.data.bones
     out: dict = {"missing": [r for r in REQUIRED if r not in roles]}
     # left/right: the left thigh must sit on the character's left (feet point forward)
@@ -274,7 +276,7 @@ def rig_report(arm: bpy.types.Object, roles: dict[str, str]) -> dict:
         out["rest_pose"] = "T" if a < 15 else "A" if a < 60 else "arms down"
     # size
     zs = [(mw @ b.head_local).z for b in bones] + [(mw @ b.tail_local).z for b in bones]
-    out["height_m"] = round(max(zs) - min(zs), 3)
+    out["height_m"] = round((max(zs) - min(zs)) * metres_per_unit(arm, roles.get("hips")), 3)
     top = [b.name for b in bones if b.parent is None]
     out["top_bones"] = top
     hips = roles.get("hips")
