@@ -8,13 +8,13 @@ The rules and where they come from are in tools/motion/BODY.md.
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass
 from typing import Any
 
 from . import body_rules as br
 from . import motion_math as mm
 from . import reactions as R
+from .names import has_word, words_of
 
 RUNNING = ("run", "sprint", "jog", "dash")
 GAIT = ("walk", "run", "jog", "sprint")
@@ -73,11 +73,6 @@ ATTACK = (
 )
 
 
-def words_of(name: str) -> list[str]:
-    """Clip name to lower-case words: "Bad_SpineWrung-Loop2" -> bad, spine, wrung, loop."""
-    return [w.lower() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])", name)]
-
-
 # Words an exporter puts in a clip's name that say nothing about the move ("root|Scene", "Take 001",
 # "Armature|mixamo.com|Layer0"): with only these, the checks read the file's name instead.
 PLACEHOLDER = (
@@ -113,11 +108,6 @@ def judged_name(clip: str, source: str = "") -> str:
     stem = source.replace("\\", "/").split("/")[-1]
     stem = stem.rsplit(".", 1)[0] if "." in stem else stem
     return clip if says_nothing(stem) else f"{stem} {clip}"
-
-
-def _has(name: str, words: tuple[str, ...]) -> bool:
-    """A word of the clip name starts with one of `words` (so "Running" counts, "Wrung" doesn't)."""
-    return any(t.startswith(w) for t in words_of(name) for w in words)
 
 
 def _pts(s: Any, key: str) -> list[tuple] | None:
@@ -178,12 +168,12 @@ def measure_body(
     com = [mm.com([(w["com:" + nm], ln) for nm, ln in lengths.items() if "com:" + nm in w]) for w in s.world]
     out.update(_feet_on_ground(c, com))
     hl, hr = _pts(s, "pt:thigh_l"), _pts(s, "pt:thigh_r")
-    if _has(name, GAIT) and hl and hr:
+    if has_word(name, GAIT) and hl and hr:
         out.update(_gait(s, hl, hr))
     hp = _pts(s, "pt:hips") or _pts(s, "hips")
     if hp:
         out.update(_spacing(c, hp, hl, hr))
-    if _has(name, ATTACK):
+    if has_word(name, ATTACK):
         strike = _strike(c, chest)
         if strike:
             out["strike"] = strike
@@ -321,7 +311,7 @@ def _feet_on_ground(c: _Clip, com: list[tuple]) -> dict:
     acc = br.accel_series(com, c.fps, span=3)
     grounded = [a for i, a in enumerate(acc, start=3) if flags["l"][i] or flags["r"][i]]
     out["com_accel_max_m_s2"] = round(max(grounded), 1) if grounded else 0.0
-    if c.standing_still and not _has(c.name, AIR_OK + GAIT + ATTACK + SUPPORTED):
+    if c.standing_still and not has_word(c.name, AIR_OK + GAIT + ATTACK + SUPPORTED):
         # static balance only: a moving body falls into its next step on purpose
         worst, worst_side = _one_foot_balance(c, com)
         out["one_foot_off_balance_m"] = round(worst, 3)
@@ -406,11 +396,11 @@ def _spacing(c: _Clip, hp: list[tuple], hl: list[tuple] | None, hr: list[tuple] 
     """Parts gliding at one steady velocity, sideways lean in a walk or run, and an idle's overlap."""
     out: dict = {"linear_runs": _linear_runs(c, hp)}
     top = _first(c.s, "pt:neck", "pt:head")
-    if _has(c.name, GAIT) and top and hl and hr:
+    if has_word(c.name, GAIT) and top and hl and hr:
         lean = _side_lean(c, hp, top, hl, hr)
         if lean is not None:
             out["lean"] = lean
-    if c.cyclic and "idle" in c.name.lower() and not _has(c.name, ("sit", "driv", "lying", "sleep")):
+    if c.cyclic and has_word(c.name, ("idle",)) and not has_word(c.name, ("sit", "driv", "lying", "sleep")):
         out["block_bob"] = _block_bob(c, hp)
     return out
 
@@ -696,7 +686,7 @@ def _trunk_issues(b: dict) -> list[Issue]:
 def _air_issues(b: dict, name: str, feet_off_ground: bool) -> list[Issue]:
     """Floating off the ground, a run that never leaves it, and the fall and hang of each flight."""
     out: list[Issue] = []
-    air_ok = _has(name, AIR_OK) or feet_off_ground
+    air_ok = has_word(name, AIR_OK) or feet_off_ground
     la = b.get("longest_airborne", 0)
     if not air_ok and la >= 2:
         out.append(
@@ -707,7 +697,7 @@ def _air_issues(b: dict, name: str, feet_off_ground: bool) -> list[Issue]:
                 "outside a run or a jump, one foot stays down.",
             )
         )
-    if _has(name, RUNNING) and "airborne_frames" in b and b["airborne_frames"] == 0 and not feet_off_ground:
+    if has_word(name, RUNNING) and "airborne_frames" in b and b["airborne_frames"] == 0 and not feet_off_ground:
         out.append(
             (
                 "no_flight",
@@ -781,7 +771,7 @@ def _gait_issues(b: dict, name: str) -> list[Issue]:
     """A walk's cadence, arms swinging with the same-side leg, and a chest turning with the hips."""
     out: list[Issue] = []
     spm = b.get("steps_per_min")
-    walking = spm and _has(name, ("walk",)) and not _has(name, RUNNING) and b.get("airborne_frames", 0) == 0
+    walking = spm and has_word(name, ("walk",)) and not has_word(name, RUNNING) and b.get("airborne_frames", 0) == 0
     if walking and (spm > 140 or spm < 70):
         out.append(
             (

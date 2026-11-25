@@ -29,6 +29,7 @@ from . import motion_math as mm
 from .checks import measure, verdicts
 from .edit import write_action
 from .fix import smooth_pops, two_bone_ik
+from .names import says_loop
 from .rig import (
     Sample,
     body_axes,
@@ -197,7 +198,7 @@ def adapt_clip(
     before = sample(arm, act, roles, scene)
     keys = _edit_keys(poses, before, a)
     if cyclic is None:
-        cyclic = "loop" in act.name.lower()
+        cyclic = says_loop(act.name)
     report = _start_report(arm, act, before, keys, a, fps, cyclic, judge)
     travels = _travels(report, before, judge)
     sp = _choose_spread(arm, roles, before, fps, cyclic, mode, spread, mirror, report["notes"])

@@ -18,7 +18,12 @@ from .core.report import panel_summary, report_text, status
 
 def armature_with_clip(context: bpy.types.Context) -> bool:
     ob = context.object
-    return ob is not None and ob.type == "ARMATURE" and ob.animation_data is not None and ob.animation_data.action
+    return (
+        ob is not None
+        and ob.type == "ARMATURE"
+        and ob.animation_data is not None
+        and ob.animation_data.action is not None
+    )
 
 
 @contextmanager

@@ -6,32 +6,50 @@ from __future__ import annotations
 import math
 
 import bpy
-from mathutils import Vector
 
 from . import body as body_checks
+from . import cycle, names
 from . import motion_math as mm
 from . import reactions as R
-from .rig import Sample, clip_label, contact_flags, in_metres, metres_per_unit, rest_space
+from .rig import (
+    Sample,
+    body_axes,
+    clip_label,
+    clip_range,
+    contact_flags,
+    in_metres,
+    metres_per_unit,
+    rest_space,
+    set_action,
+)
 
 SMALL_BONES = ("leaf", "index", "middle", "ring", "pinky", "thumb", "finger", "toe_end", "twist")
-NOT_STANDING = (
-    "sit",
-    "driv",
-    "swim",
-    "lying",
-    "lie_",
-    "death",
-    "die",
-    "roll",
-    "kneel",
-    "fall",
-    "ragdoll",
-    "push",
-    "pull",
-    "lean",
-    "climb",
-    "hang",
-)  # pushing or leaning: the object takes weight
+
+
+def scene_fps(scene: bpy.types.Scene) -> float:
+    """The scene's frames per second."""
+    return scene.render.fps / scene.render.fps_base
+
+
+def basis_rotations(frame: dict[str, tuple]) -> cycle.Pose:
+    """One sampled frame's local rotation per bone (a Sample basis frame holds (loc, quat, scale))."""
+    return {bone: lqs[1] for bone, lqs in frame.items()}
+
+
+def pose_rotations(arm: bpy.types.Object) -> cycle.Pose:
+    """Every pose bone's local rotation as it stands now, as a quaternion whatever its rotation mode."""
+    return {pb.name: tuple(pb.matrix_basis.to_quaternion()) for pb in arm.pose.bones}
+
+
+def clip_loops(arm: bpy.types.Object, act: bpy.types.Action, scene: bpy.types.Scene, name: str) -> bool:
+    """Whether the clip loops by the shared rule (cycle.loops): its name, or its first and last poses.
+    Plays the clip's first and last frames on `scene` and leaves the clip current."""
+    set_action(arm, act)
+    first, last = clip_range(act)
+    scene.frame_set(first)
+    start = pose_rotations(arm)
+    scene.frame_set(last)
+    return cycle.loops(name, start, pose_rotations(arm), last - first + 1)
 
 
 def measure(s: Sample, fps: float, cyclic: bool, arm: bpy.types.Object, name: str = "") -> dict:
@@ -66,12 +84,10 @@ def measure(s: Sample, fps: float, cyclic: bool, arm: bpy.types.Object, name: st
     out["lowest_point_m"] = round(lowest_sole, 4) if lowest_sole < math.inf else None
     if lowest_sole < math.inf and lowest_sole > 0.15:  # feet never reach the floor: swimming, hanging, flying
         out["feet_off_ground"] = True
-    if any(k in name.lower() for k in ("swim", "roll", "death", "die", "fall", "ragdoll", "climb")):
-        out["feet_off_ground"] = True  # feet aren't meant to stay planted in these
-    # loop seam: biggest bone turn between first and last frame
-    if cyclic and n > 2:
-        a, b = s.basis[0], s.basis[-1]
-        out["loop_seam_deg"] = round(max(mm.q_angle_deg(a[k][1], b[k][1]) for k in a), 2)
+    if names.meant_off_ground(name):
+        out["feet_off_ground"] = True
+    if cyclic and n > 2:  # loop seam: biggest bone turn between first and last frame
+        out["loop_seam_deg"] = round(cycle.seam_deg(basis_rotations(s.basis[0]), basis_rotations(s.basis[-1])), 2)
     out["travels"] = travels
     # knees, hips, chest, head: their lowest point (only feet should touch the floor in most clips)
     joints = [k for k in s.world[0] if k.startswith("joint:")]
@@ -105,7 +121,7 @@ def measure(s: Sample, fps: float, cyclic: bool, arm: bpy.types.Object, name: st
     lengths = {pb.name: max(0.01, pb.length) for pb in arm.pose.bones if pb.parent is not None}
     # balance (only meaningful when standing still: no ground speed)
     still = all(v["ground_speed_m_s"] < 0.15 for v in out["feet"].values()) if out["feet"] else False
-    standing = not any(k in name.lower() for k in NOT_STANDING) and not out.get("feet_off_ground") and not travels
+    standing = not names.not_standing(name) and not out.get("feet_off_ground") and not travels
     out["body"] = body_checks.measure_body(
         s,
         fps,
@@ -160,7 +176,7 @@ def verdicts(before: dict, after: dict | None, fixing: bool = False) -> list[str
                 else ""
             )
             msgs.append(f"WARN {side} foot slides {v['worst_slide_m_s']:.2f} m/s while planted (skating){was}.")
-    if r.get("loop_seam_deg", 0) > 5:
+    if r.get("loop_seam_deg", 0) > cycle.SEAM_WARN_DEG:
         msgs.append(
             f"WARN the loop doesn't join up: a bone jumps {r['loop_seam_deg']:.0f} degrees from the last frame "
             "back to the first, so it hitches every time it loops. Make the last pose match the first."
@@ -251,14 +267,9 @@ def rig_report(arm: bpy.types.Object, roles: dict[str, str]) -> dict:
     bones = arm.data.bones
     out: dict = {"missing": [r for r in REQUIRED if r not in roles]}
     # left/right: the left thigh must sit on the character's left (feet point forward)
-    fwd = Vector((0, 0, 0))
-    for side in "lr":
-        f, t = roles.get(f"foot_{side}"), roles.get(f"toe_{side}")
-        if f and t:
-            fwd += mw.to_3x3() @ (bones[t].head_local - bones[f].head_local)
-    fwd.z = 0
-    if fwd.length > 1e-6 and roles.get("thigh_l") and roles.get("thigh_r"):
-        right = fwd.normalized().cross(Vector((0, 0, 1)))
+    feet = any(roles.get(f"foot_{side}") and roles.get(f"toe_{side}") for side in "lr")
+    if feet and roles.get("thigh_l") and roles.get("thigh_r"):
+        right = body_axes(arm, roles)[1]
         dl = (mw @ bones[roles["thigh_l"]].head_local).dot(right)
         dr = (mw @ bones[roles["thigh_r"]].head_local).dot(right)
         out["sides_swapped"] = bool(dl > dr)

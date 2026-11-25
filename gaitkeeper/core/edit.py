@@ -17,6 +17,7 @@ from mathutils import Matrix, Quaternion, Vector
 from . import motion_math as mm
 from .checks import measure, verdicts
 from .fix import foot_targets, root_motion_pass, smooth_pops, two_bone_ik
+from .fix_guard import all_or_nothing
 from .rig import (
     Sample,
     body_axes,
@@ -332,47 +333,49 @@ def fix_clip(
     closed, pops smoothed (the clip's own too), root motion extracted or removed if asked. The clip is
     played on `scene`; bone edits are evaluated through `view_layer`. The original is never touched.
     Returns (new action, report); the new action is None (and deleted) if the fix made anything worse that
-    the checks call a FAIL."""
-    label = label or act.name
-    before = sample(arm, act, roles, scene)
-    report: dict = {"original": measure(before, fps, cyclic, arm, label)}
-    if report["original"].get("travels"):
-        cyclic = False  # a travelling loop keeps its seam: blending end into start would undo the travel
-    if report["original"]["pops"]:  # smooth the clip's own pops first, on a scratch copy
-        src = act.copy()
-        try:
-            set_action(arm, src)
-            smooth_pops(arm, report["original"]["pops"], len(before.world), scene, clip_range(act)[0])
-            before = sample(arm, src, roles, scene)
-        finally:
-            set_action(arm, act)
-            bpy.data.actions.remove(src)
-    ops = [{"op": "lock_feet"}] + ([{"op": "fix_loop", "frames": 4}] if cyclic else [])
-    frames, per_frame, notes = apply_local_and_time(before, ops, roles, arm, fps, cyclic)
-    new = write_action(arm, frames, name or f"{act.name}_fixed")
-    floor = {}
-    for side in "lr":
-        fb = roles.get(f"foot_{side}")
-        if fb and f"ankle_{side}" in before.world[0]:
-            floor[fb] = min(w[f"ankle_{side}"][2] for w in before.world)
-    world_pass(arm, new, ops, per_frame, roles, fps, cyclic, floor, scene, view_layer)
-    if root_motion in ("extract", "in_place"):
-        notes.append(root_motion_pass(arm, roles, len(frames), root_motion, scene, view_layer))
-    report["result"] = measure(sample(arm, new, roles, scene), fps, cyclic, arm, label)
-    for _ in range(3):  # smooth every pop left (the clip's own and any the fix made), measure again
-        fresh = dict(report["result"]["pops"])
-        if not fresh:
-            break
-        smooth_pops(arm, fresh, len(frames), scene)
+    the checks call a FAIL. If anything fails midway, every action it made is removed and the original clip
+    made current again before the error is raised."""
+    with all_or_nothing(arm):
+        label = label or act.name
+        before = sample(arm, act, roles, scene)
+        report: dict = {"original": measure(before, fps, cyclic, arm, label)}
+        if report["original"].get("travels"):
+            cyclic = False  # a travelling loop keeps its seam: blending end into start would undo the travel
+        if report["original"]["pops"]:  # smooth the clip's own pops first, on a scratch copy
+            src = act.copy()
+            try:
+                set_action(arm, src)
+                smooth_pops(arm, report["original"]["pops"], len(before.world), scene, clip_range(act)[0])
+                before = sample(arm, src, roles, scene)
+            finally:
+                set_action(arm, act)
+                bpy.data.actions.remove(src)
+        ops = [{"op": "lock_feet"}] + ([{"op": "fix_loop", "frames": 4}] if cyclic else [])
+        frames, per_frame, notes = apply_local_and_time(before, ops, roles, arm, fps, cyclic)
+        new = write_action(arm, frames, name or f"{act.name}_fixed")
+        floor = {}
+        for side in "lr":
+            fb = roles.get(f"foot_{side}")
+            if fb and f"ankle_{side}" in before.world[0]:
+                floor[fb] = min(w[f"ankle_{side}"][2] for w in before.world)
+        world_pass(arm, new, ops, per_frame, roles, fps, cyclic, floor, scene, view_layer)
+        if root_motion in ("extract", "in_place"):
+            notes.append(root_motion_pass(arm, roles, len(frames), root_motion, scene, view_layer))
         report["result"] = measure(sample(arm, new, roles, scene), fps, cyclic, arm, label)
-    notes.append("feet re-planted" + (", loop seam closed" if cyclic else ""))
-    report["changes"] = notes
-    report["verdict"] = verdicts(report["original"], report["result"], fixing=True)
-    was = verdicts(report["original"], None)
-    if any(v.startswith("FAIL") and v not in was for v in report["verdict"]):
-        report["verdict"].append("REFUSED the fix made this clip worse, so it was thrown away.")
-        bpy.data.actions.remove(new)
-        set_action(arm, act)
-        return None, report
-    new.use_fake_user = True
-    return new, report
+        for _ in range(3):  # smooth every pop left (the clip's own and any the fix made), measure again
+            fresh = dict(report["result"]["pops"])
+            if not fresh:
+                break
+            smooth_pops(arm, fresh, len(frames), scene)
+            report["result"] = measure(sample(arm, new, roles, scene), fps, cyclic, arm, label)
+        notes.append("feet re-planted" + (", loop seam closed" if cyclic else ""))
+        report["changes"] = notes
+        report["verdict"] = verdicts(report["original"], report["result"], fixing=True)
+        was = verdicts(report["original"], None)
+        if any(v.startswith("FAIL") and v not in was for v in report["verdict"]):
+            report["verdict"].append("REFUSED the fix made this clip worse, so it was thrown away.")
+            bpy.data.actions.remove(new)
+            set_action(arm, act)
+            return None, report
+        new.use_fake_user = True
+        return new, report

@@ -13,6 +13,7 @@ import bpy
 
 from .core import body as body_checks
 from .core import checks, creature, creature_fix, edit, rig, skin
+from .core.checks import scene_fps
 from .core.report import CheckResult
 from .core.rig import action_fcurves
 
@@ -40,10 +41,6 @@ class AnimalRig(NamedTuple):
     pelvis: str
     hopper: bool
     rest_widths: dict[str, float]
-
-
-def scene_fps(scene: bpy.types.Scene) -> float:
-    return scene.render.fps / scene.render.fps_base
 
 
 def write_report(text: str) -> None:
@@ -158,13 +155,22 @@ def pelvis_bone(arm: bpy.types.Object, legs: dict) -> str:
     return top.parent.name if top.parent else top.name
 
 
-def animal_rig(arm: bpy.types.Object, scene: bpy.types.Scene, view_layer: bpy.types.ViewLayer) -> AnimalRig | None:
-    """The animal setup when the scene's settings make this rig an animal with legs, else None."""
+def body_setup(
+    arm: bpy.types.Object, scene: bpy.types.Scene, view_layer: bpy.types.ViewLayer
+) -> tuple[str, AnimalRig | None]:
+    """What the scene's settings make this rig ("person", "animal" or "hopper") and, for an animal whose
+    legs were found, its animal setup (None for a person, or an animal with no legs found)."""
     legs = creature.find_legs(arm)
     animal, hopper = body_kind(arm, legs, scene, view_layer)
-    if not animal or not legs:
-        return None
-    return AnimalRig(legs, pelvis_bone(arm, legs), hopper, creature.rest_width(arm, legs))
+    if not animal:
+        return "person", None
+    found = AnimalRig(legs, pelvis_bone(arm, legs), hopper, creature.rest_width(arm, legs)) if legs else None
+    return ("hopper" if hopper else "animal"), found
+
+
+def animal_rig(arm: bpy.types.Object, scene: bpy.types.Scene, view_layer: bpy.types.ViewLayer) -> AnimalRig | None:
+    """The animal setup when the scene's settings make this rig an animal with legs, else None."""
+    return body_setup(arm, scene, view_layer)[1]
 
 
 def animates(act: bpy.types.Action, arm: bpy.types.Object) -> bool:
@@ -207,7 +213,8 @@ def check_person(
     clips = {}
     for act in reported(actions, progress):
         label = judged_label(arm, act, enemy)
-        measured = checks.measure(rig.sample(arm, act, roles, scene), fps, "loop" in act.name.lower(), arm, label)
+        cyclic = checks.clip_loops(arm, act, scene, label)
+        measured = checks.measure(rig.sample(arm, act, roles, scene), fps, cyclic, arm, label)
         clips[act.name] = partly + checks.verdicts(measured, None)
     return body_checks.misread_verdicts(clips) + rig_lines, clips
 
@@ -249,19 +256,16 @@ def run_check(
     if not arm.data.bones:
         return CheckResult(armature=arm.name, kind="person", rig=[NO_BONES], clips={})
     settings = scene.gaitkeeper
-    legs = creature.find_legs(arm)
-    animal, hopper = body_kind(arm, legs, scene, view_layer)
-    kind = ("hopper" if hopper else "animal") if animal else "person"
+    kind, animal = body_setup(arm, scene, view_layer)
     actions = clips_to_check(arm, settings.current_only)
     enemy = settings.attacks_for == "ENEMY"
     with kept_transforms(scene, view_layer), kept_frame(scene), kept_action(arm):
-        if not animal:
+        if kind == "person":
             rig_lines, clips = check_person(arm, actions, enemy, scene, view_layer, progress)
-        elif not legs:
+        elif animal is None:
             rig_lines, clips = ["FAIL no legs found: no bone chains reach the floor in the rest pose."], {}
         else:
-            found = AnimalRig(legs, pelvis_bone(arm, legs), hopper, creature.rest_width(arm, legs))
-            rig_lines, clips = check_animal(arm, actions, found, enemy, scene, progress)
+            rig_lines, clips = check_animal(arm, actions, animal, enemy, scene, progress)
     return CheckResult(armature=arm.name, kind=kind, rig=rig_lines, clips=clips)
 
 
@@ -311,7 +315,7 @@ def fixed_copy(
         )
     root = None if settings.root_motion == "LEAVE" else settings.root_motion.lower()
     label = judged_label(arm, act, settings.attacks_for == "ENEMY")
-    cyclic = "loop" in act.name.lower()
+    cyclic = checks.clip_loops(arm, act, scene, label)
     return edit.fix_clip(arm, act, rig.role_map(arm), scene_fps(scene), cyclic, scene, view_layer, root, label=label)
 
 

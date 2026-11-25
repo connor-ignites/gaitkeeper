@@ -64,6 +64,28 @@ for sfx, x in (("L", 0.15), ("R", -0.15)):
     }
 
 
+# a four-legged animal facing -Y, metres; its hind legs are named Rear... (a word holding "ear")
+QUAD_BONES: dict[str, tuple[str | None, Point, Point]] = {
+    "Pelvis": (None, (0, 0.4, 0.8), (0, 0.0, 0.85)),
+    "Chest": ("Pelvis", (0, 0.0, 0.85), (0, -0.4, 0.85)),
+    "Neck": ("Chest", (0, -0.4, 0.85), (0, -0.55, 1.05)),
+    "Head": ("Neck", (0, -0.55, 1.05), (0, -0.75, 1.05)),
+    "Tail": ("Pelvis", (0, 0.4, 0.8), (0, 0.7, 0.7)),
+}
+for sfx, x in (("L", 0.15), ("R", -0.15)):
+    for end, parent, y in (("Rear", "Pelvis", 0.4), ("Front", "Chest", -0.4)):
+        QUAD_BONES |= {
+            f"{end}Leg_{sfx}": (parent, (x, y, 0.8), (x, y + 0.05, 0.45)),
+            f"{end}Shin_{sfx}": (f"{end}Leg_{sfx}", (x, y + 0.05, 0.45), (x, y, 0.1)),
+            f"{end}Foot_{sfx}": (f"{end}Shin_{sfx}", (x, y, 0.1), (x, y - 0.1, 0.0)),
+        }
+
+
+def build_quadruped(name: str = "Quadruped") -> bpy.types.Object:
+    """A four-legged animal (QUAD_BONES) whose hind legs are RearLeg_L, RearShin_L, RearFoot_L..., made active."""
+    return make_armature(name, QUAD_BONES)
+
+
 def same_point(p: Point) -> Point:
     return p
 

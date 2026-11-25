@@ -13,9 +13,13 @@ Runs inside Blender. Lessons behind each check are in tools/motion/BODY.md (rigg
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import bpy
 from mathutils import Quaternion, Vector
 
+from .names import has_word
 from .rig import body_axes
 
 CONTROL_WORDS = ("ik", "pole", "target", "ctrl", "control", "mch", "helper")
@@ -34,8 +38,8 @@ def _meshes(arm: bpy.types.Object) -> list[bpy.types.Object]:
 
 
 def _is_control(name: str) -> bool:
-    words = name.lower().replace(".", "_").replace("-", "_").split("_")
-    return any(w.startswith(c) for w in words for c in CONTROL_WORDS)
+    """An IK target, pole or other control bone, by whole words of its name."""
+    return has_word(name, CONTROL_WORDS)
 
 
 def skin_report(arm: bpy.types.Object, roles: dict[str, str], view_layer: bpy.types.ViewLayer) -> dict:
@@ -109,25 +113,49 @@ def _evaluated_positions(meshes: list, view_layer: bpy.types.ViewLayer) -> dict:
     return out
 
 
+TRANSFORMS = ("location", "rotation_quaternion", "rotation_euler", "rotation_axis_angle", "scale")
+
+
+@contextmanager
+def kept_pose(arm: bpy.types.Object) -> Iterator[None]:
+    """Put the armature's clip (and its slot, Blender 4.4+) and every pose bone's rotation mode and
+    transform back afterwards, even if what runs inside fails. A bone's rotation mode is shared by every
+    clip (FBX bones are often Euler), so a changed mode would change how every clip plays."""
+    ad = arm.animation_data
+    action = ad.action if ad else None
+    slot = getattr(ad, "action_slot", None) if ad else None
+    modes = {pb.name: pb.rotation_mode for pb in arm.pose.bones}
+    values = {pb.name: [tuple(getattr(pb, t)) for t in TRANSFORMS] for pb in arm.pose.bones}
+    try:
+        yield
+    finally:
+        for pb in arm.pose.bones:
+            pb.rotation_mode = modes[pb.name]  # first: changing the mode converts the rotation values
+            for t, value in zip(TRANSFORMS, values[pb.name]):
+                setattr(pb, t, value)
+        if ad is not None:
+            ad.action = action
+            if slot is not None:
+                ad.action_slot = slot
+
+
 def bend_test(arm: bpy.types.Object, roles: dict[str, str], meshes: list, view_layer: bpy.types.ViewLayer) -> dict:
     """Bend each elbow and knee 90 degrees the anatomical way, and measure how much the skin
-    within reach of the joint pulls in towards it (the joint collapsing or pinching)."""
+    within reach of the joint pulls in towards it (the joint collapsing or pinching). The rig's clip,
+    rotation modes and pose are put back afterwards, even on an error."""
+    with kept_pose(arm):
+        out = _bend_joints(arm, roles, meshes, view_layer)
+    view_layer.update()
+    return out
+
+
+def _bend_joints(arm: bpy.types.Object, roles: dict[str, str], meshes: list, view_layer: bpy.types.ViewLayer) -> dict:
+    """The bend test itself, from the rest pose; changes the clip, rotation modes and pose (bend_test
+    puts them back)."""
     fwd, _, _ = body_axes(arm, roles)
     mw = arm.matrix_world
-    saved_action = arm.animation_data.action if arm.animation_data else None
     if arm.animation_data:
         arm.animation_data.action = None
-    # FBX bones are often Euler: remember every bone's mode and pose so the clips play as before
-    saved = {
-        pb.name: (
-            pb.rotation_mode,
-            pb.location.copy(),
-            pb.rotation_quaternion.copy(),
-            pb.rotation_euler.copy(),
-            pb.scale.copy(),
-        )
-        for pb in arm.pose.bones
-    }
     for pb in arm.pose.bones:
         pb.rotation_mode = "QUATERNION"
         pb.location, pb.rotation_quaternion, pb.scale = (0, 0, 0), (1, 0, 0, 0), (1, 1, 1)
@@ -164,13 +192,6 @@ def bend_test(arm: bpy.types.Object, roles: dict[str, str], meshes: list, view_l
         before = sum((rest[o.name][i] - centre).length for o, i in verts) / len(verts)
         after = sum((bent[o.name][i] - centre).length for o, i in verts) / len(verts)
         out[joint] = {"vertices": len(verts), "shrink": round(1 - after / before, 3) if before > 0 else 0.0}
-    for pb in arm.pose.bones:
-        mode, loc, q, e, sc = saved[pb.name]
-        pb.rotation_mode = mode
-        pb.location, pb.rotation_quaternion, pb.rotation_euler, pb.scale = loc, q, e, sc
-    if arm.animation_data:
-        arm.animation_data.action = saved_action
-    view_layer.update()
     return out
 
 

@@ -9,15 +9,15 @@ from core import body
 class BodyVerdicts(unittest.TestCase):
     def test_clip_name_words(self):
         self.assertEqual(body.words_of("Bad_SpineWrung-Loop2"), ["bad", "spine", "wrung", "loop"])
-        self.assertTrue(body._has("Running_Fast", body.RUNNING))
-        self.assertFalse(body._has("SpineWrung", body.RUNNING))
+        self.assertTrue(body.has_word("Running_Fast", body.RUNNING))
+        self.assertFalse(body.has_word("SpineWrung", body.RUNNING))
 
     def test_a_clip_named_root_scene_is_judged_by_its_file_name(self):
         # Blender exports name every clip "root|Scene": the file's name says what the move is
         name = body.judged_name("root|Scene", r"E:\clips\build9\Hero_Punch.fbx")
         self.assertEqual(name, "Hero_Punch root|Scene")
-        self.assertTrue(body._has(name, body.ATTACK))
-        self.assertTrue(body._has(body.judged_name("Take 001", "C:/x/Kick_Fast.glb"), body.ATTACK))
+        self.assertTrue(body.has_word(name, body.ATTACK))
+        self.assertTrue(body.has_word(body.judged_name("Take 001", "C:/x/Kick_Fast.glb"), body.ATTACK))
         # before the "|" is the rig's name, not the move's
         self.assertEqual(body.judged_name("SK_Mannequin|Scene", "Hero_Punch.fbx"), "Hero_Punch SK_Mannequin|Scene")
         self.assertEqual(body.judged_name("Armature|Idle", "Hero_Punch.fbx"), "Armature|Idle")

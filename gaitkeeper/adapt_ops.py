@@ -13,7 +13,7 @@ import bpy
 from mathutils import Matrix, Quaternion
 
 from . import runner
-from .core import adapt, creature, rig
+from .core import adapt, checks, creature, rig
 from .operators import armature_with_clip
 
 
@@ -87,13 +87,14 @@ def adapt_current(
 ) -> tuple[bpy.types.Action, dict]:
     """Run Pose Adapt on the current clip; animals are judged by the animal checks."""
     settings = scene.gaitkeeper
-    act = arm.animation_data.action
-    edited = adapt.capture_pose(arm)
+    act, frame = arm.animation_data.action, scene.frame_current
+    edited = adapt.capture_pose(arm)  # before anything plays the clip and replaces the hand-made pose
+    cyclic = checks.clip_loops(arm, act, scene, act.name)  # the same loop rule as Check and Fix
+    scene.frame_set(frame)
     animal = runner.animal_rig(arm, scene, view_layer)
-    judge, cyclic, roles = None, None, rig.role_map(arm)
+    judge, roles = None, rig.role_map(arm)
     if animal is not None:
         roles = creature.leg_roles(arm, animal.legs, animal.pelvis)
-        cyclic = creature.loops(act.name)
 
         def judge(a: bpy.types.Action) -> list[str]:
             return creature.measure_clip(

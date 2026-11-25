@@ -16,6 +16,8 @@ from . import adapt_math as am
 from . import body_rules as br
 from . import legs as L
 from . import reactions as R
+from .checks import clip_loops, scene_fps
+from .names import has_word
 from .rig import body_axes, clip_label, clip_range, metres_world, rest_space, set_action
 
 SKIP = (
@@ -44,9 +46,10 @@ TOPS_OFF = ("clavicle", "shoulder", "scapula", "collar")
 
 
 def find_legs(arm: bpy.types.Object) -> dict[str, list[str]]:
-    """leg name ("hind_l", "fore_r") -> bone names from the top joint down to the end."""
+    """leg name ("hind_l", "fore_r") -> bone names from the top joint down to the end. Tails, ears, props
+    and controls are left out by whole words of their names (names.has_word), so RearLeg_L stays in."""
     mw = rest_space(arm, None)
-    bones = [b for b in arm.data.bones if not any(k in b.name.lower() for k in SKIP)]
+    bones = [b for b in arm.data.bones if not has_word(b.name, SKIP)]
     zs = [(mw @ b.head_local).z for b in bones]  # joints of real bones only: helper tails can sit below the floor
     lo, hi = min(zs), max(zs)
     xs = [abs((mw @ b.head_local).x) for b in arm.data.bones]
@@ -82,11 +85,6 @@ def find_legs(arm: bpy.types.Object) -> dict[str, list[str]]:
         if key not in out or len(c) > len(out[key]):
             out[key] = [b.name for b in c]
     return out
-
-
-def loops(name: str) -> bool:
-    """An animal clip that repeats: by its name."""
-    return any(w in name.lower() for w in ("loop", "walk", "run", "hop", "trot", "gallop", "idle", "graze"))
 
 
 STEPPING = ("walk", "run", "trot", "gallop", "jog", "sprint", "hop", "jump", "bound")
@@ -125,11 +123,13 @@ def hops(
     """Whether a two-legged animal hops (a kangaroo) rather than walks (an emu), by its stepping clips (named
     walk, run, hop...): most of them move the feet together. None when no clip tells. Leaves the clip and
     frame it plays; the caller puts them back."""
-    fps = scene.render.fps / scene.render.fps_base
+    fps = scene_fps(scene)
     votes = []
     for act in acts:
-        if any(w in act.name.lower() for w in STEPPING):
-            vote = feet_in_phase(*feet_tracks(arm, act, legs, pelvis, scene), fps, loops(act.name))
+        name = clip_label(arm, act.name)
+        if has_word(name, STEPPING):
+            cyclic = clip_loops(arm, act, scene, name)
+            vote = feet_in_phase(*feet_tracks(arm, act, legs, pelvis, scene), fps, cyclic)
             if vote is not None:
                 votes.append(vote)
     return 2 * sum(votes) > len(votes) if votes else None
@@ -150,12 +150,13 @@ def measure_clip(
     clip as a strike with the legs even if its name doesn't say so. enemy: the clip is an enemy's (its strike
     must give the player time to react); its name can say so too."""
 
-    set_action(arm, act)
+    name = clip_label(arm, act.name)  # an export's "Scene" says nothing: the file's name can say "Bite"
+    cyclic = clip_loops(arm, act, scene, name)
     mw = metres_world(arm, pelvis)
-    a, b = round(act.frame_range[0]), round(act.frame_range[1])
+    a, b = clip_range(act)
     per_leg: dict[str, list] = {k: [] for k in legs}
     pel = []
-    ends = [pb.name for pb in arm.pose.bones if not pb.children and not any(k in pb.name.lower() for k in HELPERS)]
+    ends = [pb.name for pb in arm.pose.bones if not pb.children and not has_word(pb.name, HELPERS)]
     head = next((pb.name for pb in arm.pose.bones if pb.name.lower().startswith("head")), None)
     rel: dict[str, list] = {e: [] for e in ends}
     ez: dict[str, list] = {e: [] for e in ends}
@@ -172,8 +173,7 @@ def measure_clip(
             ez[e].append(w.z)
         if head:
             head_z.append((mw @ arm.pose.bones[head].head).z)
-    fps = scene.render.fps / scene.render.fps_base
-    cyclic = loops(act.name)
+    fps = scene_fps(scene)
     m = L.measure(per_leg, pel, fps, cyclic, rest_width)
     v = L.verdicts(m, act.name, hopper)
     floor = min((min(z) for z in ez.values() if z), default=0.0)
@@ -184,12 +184,11 @@ def measure_clip(
     }
     m["linear_runs"] = runs
     v = v + R.linear_verdicts(runs, fps)
-    low = act.name.lower()
-    if cyclic and "idle" in low and head_z and not any(w in low for w in ("sleep", "lying", "lie", "sit")):
+    resting = has_word(name, ("sleep", "lying", "lie", "sit"))
+    if cyclic and has_word(name, ("idle",)) and head_z and not resting:
         k = len(pel) - 1 if len(pel) > 2 else len(pel)  # a loop's last frame repeats the first
         v = v + R.block_verdicts([q[2] for q in pel[:k]], {"head": head_z[:k]}, fps)
-    name = clip_label(arm, act.name)  # an export's "Scene" says nothing: the file's name can say "Bite"
-    if strike or any(w in name.lower() for w in LEG_STRIKE):
+    if strike or has_word(name, LEG_STRIKE):
         sm, sv = measure_strike(arm, act, legs, per_leg, fps, hopper, scene, enemy or R.is_enemy(name))
         m["strike"] = sm
         v = v + sv
@@ -212,7 +211,7 @@ def find_upper(arm: bpy.types.Object, legs: dict[str, list[str]]) -> dict[str, l
     out: dict[str, list[str]] = {}
     for b in arm.data.bones:
         low = b.name.lower()
-        if b.name in in_legs or any(k in low for k in SKIP) or not any(k in low for k in HAND_WORDS):
+        if b.name in in_legs or has_word(b.name, SKIP) or not any(k in low for k in HAND_WORDS):
             continue
         if any(c.name.lower().startswith(HAND_WORDS) for c in b.children):
             continue  # a wrist with a hand below it: the hand is the end
@@ -265,7 +264,7 @@ def measure_upper_strike(
     set_action(arm, act)
     mw = metres_world(arm, pelvis)
     pb = arm.pose.bones
-    a, b = round(act.frame_range[0]), round(act.frame_range[1])
+    a, b = clip_range(act)
     head = parts.get("head", [None])[-1]
     jaw = find_jaw(arm, head)
     rest_gape = None
@@ -427,7 +426,7 @@ def measure_strike(
         contact = max(range(len(sp)), key=lambda i: sp[i]) + 1
         hit = [k for k in range(contact, contact + 4) if k < len(end)]
         set_action(arm, act)
-        a = round(act.frame_range[0])
+        a = clip_range(act)[0]
         dirs = []
         for f in range(a, a + len(end)):
             scene.frame_set(f)
