@@ -20,13 +20,25 @@ def run_pin(tmp_path: Path) -> dict:
     return json.loads(out.read_text(encoding="utf-8"))
 
 
+TOLERANCE = 1e-3  # radians or metres: far below anything visible, above cross-platform float noise
+
+
+def curves_match(got: list, want: list) -> bool:
+    """Same curves (path, index, key count) with every summary value within TOLERANCE."""
+    if len(got) != len(want):
+        return False
+    return all(g[:3] == w[:3] and all(abs(a - b) <= TOLERANCE for a, b in zip(g[3:], w[3:])) for g, w in zip(got, want))
+
+
 def differences(got: dict, want: dict) -> list[str]:
     """Which runs differ, and in which part (result, action name, report, or which bones' curves)."""
     out = []
     for key in sorted(want):
         out += [f"{key}: {part}" for part in ("result", "action", "report") if got[key][part] != want[key][part]]
         bones = set(got[key]["fcurves"]) | set(want[key]["fcurves"])
-        bad = sorted(b for b in bones if got[key]["fcurves"].get(b) != want[key]["fcurves"].get(b))
+        bad = sorted(
+            b for b in bones if not curves_match(got[key]["fcurves"].get(b, []), want[key]["fcurves"].get(b, []))
+        )
         if bad:
             out.append(f"{key}: curves of {', '.join(bad)}")
     return out

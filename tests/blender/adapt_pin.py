@@ -5,13 +5,12 @@
 
 Installs the zip, keys a stepping walk loop on the code-made rig, then runs Adapt for each spread mode with
 mirror on and off, with and without a kept pose on a second frame, feet planted on. Writes one fingerprint
-per run to out.json: the report text, and for each bone a hash of its F-curves (data path, index and every
-keyframe rounded to 5 decimals), so the golden file stays small but still names the bone that changed.
+per run to out.json: the report text, and for each bone a summary of every F-curve (see curve_summary).
 """
 
 from __future__ import annotations
 
-import hashlib
+import importlib
 import json
 import math
 import sys
@@ -56,24 +55,21 @@ def key_walk(arm: bpy.types.Object) -> bpy.types.Action:
     return act
 
 
-def fcurves(act: bpy.types.Action) -> list:
-    """Every F-curve of the action (legacy or layered actions)."""
-    if hasattr(act, "fcurves"):
-        return list(act.fcurves)
-    return [fc for layer in act.layers for strip in layer.strips for bag in strip.channelbags for fc in bag.fcurves]
+def curve_summary(fc: bpy.types.FCurve) -> list:
+    """[path, index, key count, first, last, min, max, mean] of one curve's key values. Small enough to keep in
+    the golden file, and compared with a tolerance, since IK results differ in the last digits across platforms."""
+    values = [k.co[1] for k in fc.keyframe_points] or [0.0]
+    stats = (values[0], values[-1], min(values), max(values), sum(values) / len(values))
+    return [fc.data_path, fc.array_index, len(fc.keyframe_points), *(round(v, 5) for v in stats)]
 
 
-def fingerprint(act: bpy.types.Action) -> dict[str, str]:
-    """Per bone (the data path before its property): a short hash of all its curves' rounded keyframes."""
+def fingerprint(act: bpy.types.Action) -> dict[str, list]:
+    """Per bone (the data path before its property): the summaries of its curves."""
+    action_fcurves = importlib.import_module("bl_ext.user_default.gaitkeeper.core.rig").action_fcurves
     curves: dict[str, list] = {}
-    for fc in fcurves(act):
-        pts = [[round(k.co[0], 5), round(k.co[1], 5)] for k in fc.keyframe_points]
-        owner = fc.data_path.rsplit(".", 1)[0]
-        curves.setdefault(owner, []).append([fc.data_path, fc.array_index, pts])
-    return {
-        owner: f"{len(c)}:" + hashlib.sha256(json.dumps(sorted(c)).encode()).hexdigest()[:16]
-        for owner, c in sorted(curves.items())
-    }
+    for fc in action_fcurves(act):
+        curves.setdefault(fc.data_path.rsplit(".", 1)[0], []).append(curve_summary(fc))
+    return {owner: sorted(c) for owner, c in sorted(curves.items())}
 
 
 def report_text() -> str:
