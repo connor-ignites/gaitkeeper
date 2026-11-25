@@ -51,6 +51,38 @@ def kept_frame(scene: bpy.types.Scene) -> Iterator[None]:
         scene.frame_set(frame)
 
 
+TRANSFORMS = ("location", "rotation_quaternion", "rotation_euler", "rotation_axis_angle", "scale")
+
+
+def _transform(item: bpy.types.Object | bpy.types.PoseBone) -> tuple:
+    return tuple(tuple(getattr(item, name)) for name in TRANSFORMS)
+
+
+def _set_transform(item: bpy.types.Object | bpy.types.PoseBone, values: tuple) -> None:
+    for name, value in zip(TRANSFORMS, values):
+        setattr(item, name, value)
+
+
+@contextmanager
+def kept_transforms(scene: bpy.types.Scene, skip: bpy.types.Object | None = None) -> Iterator[None]:
+    """Put every object's and pose bone's transform back, keyed or not. Playing clips frame by frame
+    re-evaluates animation, which would otherwise throw away a pose the user set but hasn't keyed."""
+    saved = []
+    for ob in scene.objects:
+        if ob == skip:
+            continue
+        saved.append((ob, _transform(ob)))
+        if ob.type == "ARMATURE" and ob.pose is not None:
+            saved += [(pb, _transform(pb)) for pb in ob.pose.bones]
+    try:
+        yield
+    finally:
+        bpy.context.view_layer.update()  # let the restored clip evaluate first, so it can't overwrite the pose
+        for item, values in saved:
+            _set_transform(item, values)
+        bpy.context.view_layer.update()
+
+
 @contextmanager
 def kept_action(arm: bpy.types.Object) -> Iterator[None]:
     """Put the armature's current clip (and its slot, Blender 4.4+) back."""
@@ -170,7 +202,8 @@ def run_check(arm: bpy.types.Object, settings) -> CheckResult:
     kind = ("hopper" if hopper else "animal") if animal else "person"
     actions = clips_to_check(arm, settings.current_only)
     enemy = settings.attacks_for == "ENEMY"
-    with kept_frame(bpy.context.scene), kept_action(arm):
+    scene = bpy.context.scene
+    with kept_transforms(scene), kept_frame(scene), kept_action(arm):
         if not animal:
             rig_lines, clips = check_person(arm, actions, enemy)
         elif not legs:
@@ -186,7 +219,7 @@ def fix_current_clip(arm: bpy.types.Object, settings) -> tuple[bpy.types.Action 
     act = arm.animation_data.action
     scene = bpy.context.scene
     animal = animal_rig(arm, settings)
-    with kept_frame(scene):
+    with kept_transforms(scene, skip=arm), kept_frame(scene):
         if animal is not None:
             new, rep = creature_fix.fix_creature(
                 arm, act, animal.legs, animal.pelvis, animal.hopper, animal.rest_widths, settings.every_clip_strikes
