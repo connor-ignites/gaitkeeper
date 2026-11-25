@@ -9,6 +9,7 @@ import bpy
 from mathutils import Matrix, Vector
 
 from . import motion_math as mm
+from .rig import key_rotation, set_rotation
 
 DRAG_LIFT = 0.012  # m: a dragged foot is lifted until the ball of the foot is this far above its planted height
 
@@ -187,14 +188,15 @@ def root_motion_pass(arm: bpy.types.Object, roles: dict[str, str], n: int, mode:
         bpy.context.view_layer.update()
         for pb in (root, hips):
             pb.keyframe_insert("location", frame=f, group=pb.name)
-            pb.keyframe_insert("rotation_quaternion", frame=f, group=pb.name)
+            key_rotation(pb, f)
     word = "moved onto the root bone" if mode == "extract" else "removed (walks on the spot)"
     return f"root motion: {total.length:.2f} m of travel {word}"
 
 
-def smooth_pops(arm: bpy.types.Object, pops: dict[str, list[int]], n: int) -> int:
+def smooth_pops(arm: bpy.types.Object, pops: dict[str, list[int]], n: int, start: int = 0) -> int:
     """Spread each one-frame snap over its neighbours: the poses either side of the jump are
-    re-keyed halfway between their own neighbours. Returns how many keys were changed."""
+    re-keyed halfway between their own neighbours. `pops` holds sample indices; sample j is frame
+    start + j. Returns how many keys were changed."""
     scn = bpy.context.scene
     changed = 0
     for name, frames in pops.items():
@@ -202,17 +204,15 @@ def smooth_pops(arm: bpy.types.Object, pops: dict[str, list[int]], n: int) -> in
         if pb is None:
             continue
         rots = []
-        for f in range(n):
-            scn.frame_set(f)
+        for j in range(n):
+            scn.frame_set(start + j)
             rots.append(tuple(pb.matrix_basis.to_quaternion()))
         for i in frames:
             for j in (i, i + 1):
                 if 0 < j < n - 1:
-                    q = mm.q_slerp(rots[j - 1], rots[j + 1], 0.5)
-                    rots[j] = q
-                    pb.rotation_mode = "QUATERNION"
-                    scn.frame_set(j)
-                    pb.rotation_quaternion = q
-                    pb.keyframe_insert("rotation_quaternion", frame=j, group=pb.name)
+                    rots[j] = mm.q_slerp(rots[j - 1], rots[j + 1], 0.5)
+                    scn.frame_set(start + j)
+                    set_rotation(pb, rots[j])
+                    key_rotation(pb, start + j)
                     changed += 1
     return changed

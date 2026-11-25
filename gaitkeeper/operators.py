@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 
 import bpy
 from bpy.props import StringProperty
@@ -33,7 +34,8 @@ class GAITKEEPER_OT_check(bpy.types.Operator):
         settings = context.scene.gaitkeeper
         try:
             result = runner.run_check(context.object, settings)
-        except Exception as e:  # shown in the UI rather than as a traceback
+        except Exception as e:  # reported in the UI; the traceback goes to the system console
+            traceback.print_exc()
             self.report({"ERROR"}, f"GaitKeeper couldn't check this rig: {type(e).__name__}: {e}")
             return {"CANCELLED"}
         runner.write_report(report_text(result))
@@ -62,7 +64,8 @@ the original is not changed"""
     def execute(self, context: bpy.types.Context) -> set[str]:
         try:
             new, rep = runner.fix_current_clip(context.object, context.scene.gaitkeeper)
-        except Exception as e:  # shown in the UI rather than as a traceback
+        except Exception as e:  # reported in the UI; the traceback goes to the system console
+            traceback.print_exc()
             self.report({"ERROR"}, f"GaitKeeper couldn't fix this clip: {type(e).__name__}: {e}")
             return {"CANCELLED"}
         runner.write_report(runner.fix_report_text(new, rep))
@@ -81,7 +84,7 @@ class GAITKEEPER_OT_show(bpy.types.Operator):
 
     bl_idname = "gaitkeeper.show"
     bl_label = "Show clip"
-    bl_options = {"INTERNAL"}
+    bl_options = {"INTERNAL", "UNDO"}
 
     clip: StringProperty()  # type: ignore[valid-type]
 

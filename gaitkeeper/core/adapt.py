@@ -27,7 +27,7 @@ from . import motion_math as mm
 from .checks import measure, verdicts
 from .edit import write_action
 from .fix import smooth_pops, two_bone_ik
-from .rig import body_axes, clip_range, contact_flags, leg_sides, sample, set_action, split_name
+from .rig import body_axes, clip_range, contact_flags, key_rotation, leg_sides, sample, set_action, split_name
 
 Pose = dict[str, tuple[tuple, tuple, tuple]]
 LEG_ROLES = ("thigh", "calf", "foot", "toe")
@@ -456,7 +456,7 @@ def _keep_feet(
                 continue
             two_bone_ik(arm, pb[thigh], pb[calf], fb, target, rot)
             for bone in (pb[thigh], pb[calf], fb):
-                bone.keyframe_insert("rotation_quaternion", frame=f, group=bone.name)
+                key_rotation(bone, f)
                 bone.keyframe_insert("location", frame=f, group=bone.name)
 
 

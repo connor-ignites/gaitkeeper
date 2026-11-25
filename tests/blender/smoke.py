@@ -36,6 +36,8 @@ def check_clips() -> str:
     arm = demo_rig.build_rig()
     demo_rig.key_idle(arm)
     demo_rig.key_glide(arm)
+    demo_rig.key_other_object()
+    bpy.context.view_layer.objects.active = arm
     step("poll", bpy.ops.gaitkeeper.check.poll())
     result = bpy.ops.gaitkeeper.check()
     step("check", result == {"FINISHED"}, str(result))
@@ -46,6 +48,7 @@ def read_report(report: str) -> None:
     lines = report.splitlines()
     step("kind", "(checked as: person)" in lines[0], lines[0])
     step("both clips", any(line.endswith("  Idle") for line in lines) and "Walk_Glide" in report)
+    step("other objects' clips left out", "PropMove" not in report)
     glide = next(line for line in lines if line.endswith("  Walk_Glide"))
     step("glide flagged", not glide.startswith("PASS"), glide)
     step("skating named", "skating" in report)
@@ -54,10 +57,16 @@ def read_report(report: str) -> None:
 
 
 def fix_makes_copy() -> None:
+    arm = bpy.context.object
+    modes = {pb.name: pb.rotation_mode for pb in arm.pose.bones}
     before = set(bpy.data.actions.keys())
-    bpy.ops.gaitkeeper.fix()
-    made = set(bpy.data.actions.keys()) - before
-    step("fix keeps original", "Walk_Glide" in bpy.data.actions, f"new: {sorted(made)}")
+    result = bpy.ops.gaitkeeper.fix()
+    made = sorted(set(bpy.data.actions.keys()) - before)
+    step("fix runs", result == {"FINISHED"}, str(result))
+    step("fix makes one copy", made == ["Walk_Glide_fixed"], str(made))
+    step("fix keeps original", "Walk_Glide" in bpy.data.actions)
+    changed = [name for name, mode in modes.items() if arm.pose.bones[name].rotation_mode != mode]
+    step("rotation modes kept", not changed, str(changed))
 
 
 def uninstall() -> None:

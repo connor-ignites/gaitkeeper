@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 
 import bpy
 from mathutils import Matrix, Quaternion
@@ -131,7 +132,8 @@ the original clip is not changed"""
         act, frame = arm.animation_data.action, scene.frame_current
         try:
             new, rep = adapt_current(arm, scene)
-        except Exception as e:  # shown in the UI rather than as a traceback
+        except Exception as e:  # reported in the UI; the traceback goes to the system console
+            traceback.print_exc()
             rig.set_action(arm, act)
             scene.frame_set(frame)
             self.report(*self.failure_message(e, scene))

@@ -4,6 +4,7 @@ and leaves the scene as it found it."""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import NamedTuple
@@ -15,7 +16,9 @@ from .core import checks, creature, creature_fix, edit, rig, skin
 from .core.report import CheckResult
 
 REPORT_NAME = "GaitKeeper report"
-POSE_CLIP_WORDS = ("tpose", "t_pose", "apose", "a_pose")  # rest-pose clips, never checked
+POSE_CLIP = re.compile(r"(^|[^a-z0-9])[ta][ _-]?pose([^a-z0-9]|$)")  # T-pose and A-pose clips, never checked
+TAIL = re.compile(r"(^|[^a-z])tail")  # "Tail_01", "tail.L"; not "ponytail"
+BONE_PATH = re.compile(r'pose\.bones\["([^"]+)"\]')
 
 
 class AnimalRig(NamedTuple):
@@ -57,7 +60,9 @@ def kept_action(arm: bpy.types.Object) -> Iterator[None]:
     try:
         yield
     finally:
-        if ad is not None:
+        if ad is None:
+            arm.animation_data_clear()
+        else:
             ad.action = action
             if slot is not None:
                 ad.action_slot = slot
@@ -65,7 +70,7 @@ def kept_action(arm: bpy.types.Object) -> Iterator[None]:
 
 def body_kind(arm: bpy.types.Object, legs: dict, settings) -> tuple[bool, bool]:
     """(animal, hopper). Auto: four legs, or two legs and a tail, is an animal; two legs and a tail hop."""
-    tail = any("tail" in b.name.lower() for b in arm.data.bones)
+    tail = any(TAIL.search(b.name.lower()) for b in arm.data.bones)
     fore = any(k.startswith("fore") for k in legs)
     animal, hopper = fore or tail, tail and not fore and len(legs) == 2
     if settings.body != "AUTO":
@@ -93,11 +98,34 @@ def animal_rig(arm: bpy.types.Object, settings) -> AnimalRig | None:
     return AnimalRig(legs, pelvis_bone(arm, legs), hopper, creature.rest_width(arm, legs))
 
 
+def action_fcurves(act: bpy.types.Action) -> list[bpy.types.FCurve]:
+    """Every F-curve in the action: the legacy list (before Blender 5.0) and the layered channelbags (4.4+)."""
+    curves = list(getattr(act, "fcurves", None) or [])
+    for layer in getattr(act, "layers", []):
+        for strip in layer.strips:
+            for bag in getattr(strip, "channelbags", []):
+                curves += list(bag.fcurves)
+    return curves
+
+
+def animates(act: bpy.types.Action, arm: bpy.types.Object) -> bool:
+    """True when the action keys at least one of this armature's bones."""
+    bones = set(arm.pose.bones.keys())
+    matches = (BONE_PATH.match(fc.data_path) for fc in action_fcurves(act))
+    return any(m is not None and m[1] in bones for m in matches)
+
+
 def clips_to_check(arm: bpy.types.Object, current_only: bool) -> list[bpy.types.Action]:
+    """The current clip, or every clip in the file that animates this rig (rest-pose clips left out)."""
     if current_only:
         ad = arm.animation_data
         return [ad.action] if ad and ad.action else []
-    return [a for a in bpy.data.actions if not any(w in a.name.lower().replace("-", "_") for w in POSE_CLIP_WORDS)]
+    return [a for a in bpy.data.actions if animates(a, arm) and not POSE_CLIP.search(a.name.lower())]
+
+
+def judged_label(arm: bpy.types.Object, act: bpy.types.Action, enemy: bool) -> str:
+    """The name the checks read for this clip; Check and Fix must judge the same way."""
+    return rig.clip_label(arm, act.name) + (" (enemy)" if enemy else "")
 
 
 def check_person(arm: bpy.types.Object, actions: list, enemy: bool) -> tuple[list[str], dict[str, list[str]]]:
@@ -109,7 +137,7 @@ def check_person(arm: bpy.types.Object, actions: list, enemy: bool) -> tuple[lis
     rig_lines += skin.skin_verdicts(skin.skin_report(arm, roles), saved_file)
     clips = {}
     for act in actions:
-        label = rig.clip_label(arm, act.name) + (" (enemy)" if enemy else "")
+        label = judged_label(arm, act, enemy)
         measured = checks.measure(rig.sample(arm, act, roles), fps, "loop" in act.name.lower(), arm, label)
         clips[act.name] = checks.verdicts(measured, None)
     return body_checks.misread_verdicts(clips) + rig_lines, clips
@@ -165,7 +193,9 @@ def fix_current_clip(arm: bpy.types.Object, settings) -> tuple[bpy.types.Action 
             )
         else:
             root = None if settings.root_motion == "LEAVE" else settings.root_motion.lower()
-            new, rep = edit.fix_clip(arm, act, rig.role_map(arm), scene_fps(scene), "loop" in act.name.lower(), root)
+            label = judged_label(arm, act, settings.attacks_for == "ENEMY")
+            fps = scene_fps(scene)
+            new, rep = edit.fix_clip(arm, act, rig.role_map(arm), fps, "loop" in act.name.lower(), root, label=label)
     if new is not None:
         rig.set_action(arm, new)
     return new, rep

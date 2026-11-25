@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""GaitKeeper: loading files, finding the humanoid bones, sampling clips. Runs inside Blender."""
+"""GaitKeeper: finding the humanoid bones and sampling clips. Runs inside Blender."""
 
 from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 
 import bpy
-from mathutils import Vector
+from mathutils import Quaternion, Vector
 
 from . import motion_math as mm
 
@@ -69,10 +70,10 @@ for side, mix, sfx in (("l", "Left", ".l"), ("r", "Right", ".r")):
 
 def clip_label(arm: bpy.types.Object, name: str) -> str:
     """The name the checks read: the clip's own, or the file's in front of it when the clip's says
-    nothing ("root|Scene"). The file is the one load() read, else the open .blend, else the rig's name."""
+    nothing ("root|Scene"). The file is the open .blend, else the rig's name."""
     from .body import judged_name
 
-    src = bpy.context.scene.get("gaitkeeper_source") or bpy.data.filepath or arm.name
+    src = bpy.data.filepath or arm.name
     return judged_name(name, str(src))
 
 
@@ -157,6 +158,31 @@ def set_action(arm: bpy.types.Object, act: bpy.types.Action) -> None:
     slots = getattr(act, "slots", None)
     if slots is not None and getattr(ad, "action_slot", None) is None and len(slots):
         ad.action_slot = slots[0]
+
+
+ROTATION_PATHS = {"QUATERNION": "rotation_quaternion", "AXIS_ANGLE": "rotation_axis_angle"}
+
+
+def rotation_path(pb: bpy.types.PoseBone) -> str:
+    """The rotation property the bone's own rotation mode animates. A bone's mode is shared by every clip,
+    so edits key this property instead of switching the bone to quaternions."""
+    return ROTATION_PATHS.get(pb.rotation_mode, "rotation_euler")
+
+
+def set_rotation(pb: bpy.types.PoseBone, q: Sequence[float]) -> None:
+    """Pose the bone's local rotation as quaternion q (w, x, y, z), in whatever mode the bone uses."""
+    quat = Quaternion(q)
+    if pb.rotation_mode == "QUATERNION":
+        pb.rotation_quaternion = quat
+    elif pb.rotation_mode == "AXIS_ANGLE":
+        axis, angle = quat.to_axis_angle()
+        pb.rotation_axis_angle = (angle, *axis)
+    else:
+        pb.rotation_euler = quat.to_euler(pb.rotation_mode, pb.rotation_euler)  # nearest to the last key
+
+
+def key_rotation(pb: bpy.types.PoseBone, frame: int) -> None:
+    pb.keyframe_insert(rotation_path(pb), frame=frame, group=pb.name)
 
 
 def clip_range(act: bpy.types.Action) -> tuple[int, int]:

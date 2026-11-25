@@ -17,16 +17,7 @@ from mathutils import Matrix, Vector
 
 from . import creature as CR
 from . import legs as LG
-from .rig import body_axes, set_action
-
-
-def key_bone(pb: bpy.types.PoseBone, f: int) -> None:
-    if pb.rotation_mode == "QUATERNION":
-        pb.keyframe_insert("rotation_quaternion", frame=f, group=pb.name)
-    elif pb.rotation_mode == "AXIS_ANGLE":
-        pb.keyframe_insert("rotation_axis_angle", frame=f, group=pb.name)
-    else:
-        pb.keyframe_insert("rotation_euler", frame=f, group=pb.name)
+from .rig import body_axes, key_rotation, set_action
 
 
 def best_turn(axis: Vector, pivot: Vector, joint: Vector, side: Vector, fwd: Vector, keep: float = 0.0) -> float:
@@ -97,7 +88,7 @@ def legs_in_line(
                 bpy.context.view_layer.update()
                 touched |= {k - 1, k, k + 1}
             for k in sorted(touched):
-                key_bone(pbs[k], f)
+                key_rotation(pbs[k], f)
     return new
 
 

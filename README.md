@@ -87,7 +87,8 @@ Clip names matter. GaitKeeper reads words like `walk`, `run`, `loop`, `punch` an
 ## Known limits
 
 - It finds bones by name (Mixamo-style, Unreal-style, `.L`/`.R` and similar). An unusual naming scheme may need the Body setting set by hand, and a rig with a bone named "tail" is treated as an animal on Auto.
-- Check clips looks at every action in the file. On a file with several characters, open each one's clips on its own, or tick **Current clip only**.
+- Check clips takes every action in the file that keys this armature's bones. Two characters with the same bone names in one file will pick up each other's clips; tick **Current clip only** there.
+- Feet are judged against a flat floor. A clip authored on a slope or on stairs will read as sinking or floating.
 - Each clip is played frame by frame through Blender, so a heavy scene with high-poly meshes is slow to check.
 - The thresholds come from motion-capture data and real footage of people, dogs and kangaroos. They suit realistic and semi-realistic motion. Cartoon timing and squash will get more WARNs, because exaggerated motion breaks the same rules a broken clip does.
 - Fix handles feet, seams, pops and root motion. It won't repair a bad pose or bad timing; it tells you where they are.

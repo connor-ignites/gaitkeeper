@@ -41,10 +41,14 @@ class GAITKEEPER_PT_panel(bpy.types.Panel):
         fix.prop(settings, "root_motion")
         fix.operator("gaitkeeper.fix", icon="MODIFIER")
         self.draw_adapt(col.box(), settings, current_clip(context))
-        if not settings.result:
+        try:
+            result = json.loads(settings.result) if settings.result else None
+        except ValueError:
+            result = None
+        if result is None:
             col.label(text="Select an armature and press Check.")
             return
-        self.draw_result(col, json.loads(settings.result), current_clip(context))
+        self.draw_result(col, result, current_clip(context))
 
     @staticmethod
     def draw_adapt(box: bpy.types.UILayout, settings, act: bpy.types.Action | None) -> None:

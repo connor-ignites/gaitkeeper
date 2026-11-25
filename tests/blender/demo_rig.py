@@ -47,7 +47,20 @@ def build_rig(name: str = "Person") -> bpy.types.Object:
         if parent:
             arm.data.edit_bones[bone].parent = arm.data.edit_bones[parent]
     bpy.ops.object.mode_set(mode="OBJECT")
+    for bone in ("Hips", "LeftUpLeg", "RightUpLeg"):  # FBX imports are often Euler: Fix must keep the mode
+        arm.pose.bones[bone].rotation_mode = "XYZ"
     return arm
+
+
+def key_other_object() -> bpy.types.Action:
+    """A clip on another object, which Check must leave out."""
+    empty = bpy.data.objects.new("Prop", None)
+    bpy.context.scene.collection.objects.link(empty)
+    for f in (1, 20):
+        empty.location.x = f / 10
+        empty.keyframe_insert("location", frame=f)
+    empty.animation_data.action.name = "PropMove"
+    return empty.animation_data.action
 
 
 def new_clip(arm: bpy.types.Object, name: str, frames: int) -> bpy.types.Action:

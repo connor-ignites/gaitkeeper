@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""GaitKeeper: editing a clip in Blender (shared by the command line and the add-on).
+"""GaitKeeper: editing a clip in Blender (the Fix button and Pose Adapt).
 
 apply_local_and_time works on sampled frames (local pose of every bone); write_action keys them as a
 new action; world_pass then makes the world-space changes per frame (leans, pelvis, bounce) and
@@ -17,7 +17,18 @@ from mathutils import Matrix, Quaternion, Vector
 from . import motion_math as mm
 from .checks import measure, verdicts
 from .fix import foot_targets, root_motion_pass, smooth_pops, two_bone_ik
-from .rig import Sample, body_axes, contact_flags, interp_basis, interp_list, sample, set_action
+from .rig import (
+    Sample,
+    body_axes,
+    clip_range,
+    contact_flags,
+    interp_basis,
+    interp_list,
+    key_rotation,
+    sample,
+    set_action,
+    set_rotation,
+)
 
 
 def bone_group(group: str, roles: dict[str, str], arm: bpy.types.Object) -> list[str]:
@@ -166,14 +177,13 @@ def describe(op: dict) -> str:
 def write_action(arm: bpy.types.Object, frames: list[dict], name: str) -> bpy.types.Action:
     act = bpy.data.actions.new(name)
     set_action(arm, act)
-    for pb in arm.pose.bones:
-        pb.rotation_mode = "QUATERNION"
     for i, fr in enumerate(frames):
         for pb in arm.pose.bones:
             loc, q, sc = fr[pb.name]
-            pb.location, pb.rotation_quaternion, pb.scale = loc, q, sc
+            pb.location, pb.scale = loc, sc
+            set_rotation(pb, q)
             pb.keyframe_insert("location", frame=i, group=pb.name)
-            pb.keyframe_insert("rotation_quaternion", frame=i, group=pb.name)
+            key_rotation(pb, i)
             pb.keyframe_insert("scale", frame=i, group=pb.name)
     return act
 
@@ -299,7 +309,7 @@ def world_pass(
                 two_bone_ik(arm, thigh, calf, foot, tgt, rot)
         for pb in arm.pose.bones:
             pb.keyframe_insert("location", frame=f, group=pb.name)
-            pb.keyframe_insert("rotation_quaternion", frame=f, group=pb.name)
+            key_rotation(pb, f)
 
 
 def fix_clip(
@@ -310,21 +320,26 @@ def fix_clip(
     cyclic: bool,
     root_motion: str | None = None,
     name: str | None = None,
+    label: str | None = None,
 ) -> tuple[bpy.types.Action | None, dict]:
     """The standard fix on a COPY of the clip: feet re-planted (nudged at most 8 cm), the loop seam
     closed, pops smoothed (the clip's own too), root motion extracted or removed if asked. The original
     is never touched. Returns (new action, report); the new action is None (and deleted) if the fix made
     anything worse that the checks call a FAIL."""
+    label = label or act.name
     before = sample(arm, act, roles)
-    report: dict = {"original": measure(before, fps, cyclic, arm, act.name)}
+    report: dict = {"original": measure(before, fps, cyclic, arm, label)}
     if report["original"].get("travels"):
         cyclic = False  # a travelling loop keeps its seam: blending end into start would undo the travel
-    if report["original"]["pops"]:  # smooth the clip's own pops first, on a copy (see blender_motion)
+    if report["original"]["pops"]:  # smooth the clip's own pops first, on a scratch copy
         src = act.copy()
-        src.name = f"{act.name}_unpopped"
-        set_action(arm, src)
-        smooth_pops(arm, report["original"]["pops"], len(before.world))
-        before = sample(arm, src, roles)
+        try:
+            set_action(arm, src)
+            smooth_pops(arm, report["original"]["pops"], len(before.world), clip_range(act)[0])
+            before = sample(arm, src, roles)
+        finally:
+            set_action(arm, act)
+            bpy.data.actions.remove(src)
     ops = [{"op": "lock_feet"}] + ([{"op": "fix_loop", "frames": 4}] if cyclic else [])
     frames, per_frame, notes = apply_local_and_time(before, ops, roles, arm, fps, cyclic)
     new = write_action(arm, frames, name or f"{act.name}_fixed")
@@ -336,13 +351,13 @@ def fix_clip(
     world_pass(arm, new, ops, per_frame, roles, fps, cyclic, floor)
     if root_motion in ("extract", "in_place"):
         notes.append(root_motion_pass(arm, roles, len(frames), root_motion))
-    report["result"] = measure(sample(arm, new, roles), fps, cyclic, arm, act.name)
+    report["result"] = measure(sample(arm, new, roles), fps, cyclic, arm, label)
     for _ in range(3):  # smooth every pop left (the clip's own and any the fix made), measure again
         fresh = dict(report["result"]["pops"])
         if not fresh:
             break
         smooth_pops(arm, fresh, len(frames))
-        report["result"] = measure(sample(arm, new, roles), fps, cyclic, arm, act.name)
+        report["result"] = measure(sample(arm, new, roles), fps, cyclic, arm, label)
     notes.append("feet re-planted" + (", loop seam closed" if cyclic else ""))
     report["changes"] = notes
     report["verdict"] = verdicts(report["original"], report["result"], fixing=True)
